@@ -1,0 +1,16 @@
+snapcamera-be:
+    stage: deploy
+    tags:
+      - client-aws
+    before_script:
+        - 'which ssh-agent || ( apt-get update -y && apt-get install openssh-client -y )'
+        - mkdir -p ~/.ssh
+        - eval $(ssh-agent -s)
+        - '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
+    script:
+        - echo "Deploy to Client AWS"
+        - ssh-add <(echo "$aws_ssh_pri_key")
+        - rm -rf .git
+        - ssh -o StrictHostKeyChecking=no snapcamera-be@172.31.44.191 "cd /home/snapcamera-be/snapcamera-be; git reset --hard; git pull origin main; export PATH=$PATH:/home/snapcamera-be/.nvm/versions/node/v18.20.3/bin/; npm install --force; pm2 restart 0; exit"
+    only:
+        - main
