@@ -16,6 +16,7 @@ import { RefreshToken } from "../../models/refreshToken";
 import { sendPasswordReset } from "../services/mailService";
 import { resolveEntitlement } from "../services/entitlementService";
 import { logger } from "../../util/logger";
+import { claimWithLease, settleLease, releaseLease } from "../services/leaseService";
 
 const RESET_TTL_MS = 30 * 60 * 1000;
 
@@ -235,17 +236,14 @@ export const resetPassword = async (req, res, next) => {
     const token = requireString(req.body?.token, "token");
     const password = requirePassword(req.body?.password);
 
-    // Consumed by an atomic conditional update, so simultaneous requests
-    // carrying the same token cannot both set a password.
-    const record = await PasswordReset.findOneAndUpdate(
-      {
-        token_hash: sha256(token),
-        used_at: { $exists: false },
-        expires_at: { $gt: new Date() },
-      },
-      { $set: { used_at: new Date() } },
-      { new: true }
-    );
+    // Claimed under a lease rather than marked used up front: simultaneous
+    // requests still cannot both proceed, but a failure before the password
+    // is actually changed gives the code back instead of spending it.
+    const record = await claimWithLease(PasswordReset, {
+      token_hash: sha256(token),
+      used_at: { $exists: false },
+      expires_at: { $gt: new Date() },
+    });
 
     if (!record) {
       return res.status(400).json({
@@ -255,34 +253,43 @@ export const resetPassword = async (req, res, next) => {
       });
     }
 
-    const user = await User.findById(record.user_id);
-    if (!user || user.status !== "active") {
-      return res.status(400).json({
-        status: "Error",
-        code: "invalid_reset_token",
-        message: "This reset link is invalid or has expired.",
+    try {
+      const user = await User.findById(record.user_id);
+      if (!user || user.status !== "active") {
+        await releaseLease(PasswordReset, record._id);
+        return res.status(400).json({
+          status: "Error",
+          code: "invalid_reset_token",
+          message: "This reset link is invalid or has expired.",
+        });
+      }
+
+      user.password = await bcrypt.hash(password, config.auth.bcryptCost);
+      user.password_updated_at = new Date();
+      // Invalidates every access token already issued for this account.
+      user.token_version = (user.token_version ?? 0) + 1;
+      await user.save();
+
+      await revokeAllForUser(user._id);
+
+      // The password has changed, so the code is now genuinely spent.
+      await settleLease(PasswordReset, record._id, "used_at");
+
+      await AuditLog.create({
+        action: "account.password_reset",
+        user_id: user._id,
+        subject_id: user.subject_id,
+        ip_hash: hashIp(req.ip),
       });
+
+      return res.status(200).json({
+        status: "Success",
+        message: "Password updated. Please sign in again.",
+      });
+    } catch (error) {
+      await releaseLease(PasswordReset, record._id, error);
+      throw error;
     }
-
-    user.password = await bcrypt.hash(password, config.auth.bcryptCost);
-    user.password_updated_at = new Date();
-    // Invalidates every access token already issued for this account.
-    user.token_version = (user.token_version ?? 0) + 1;
-    await user.save();
-
-    await revokeAllForUser(user._id);
-
-    await AuditLog.create({
-      action: "account.password_reset",
-      user_id: user._id,
-      subject_id: user.subject_id,
-      ip_hash: hashIp(req.ip),
-    });
-
-    return res.status(200).json({
-      status: "Success",
-      message: "Password updated. Please sign in again.",
-    });
   } catch (error) {
     return next(error);
   }

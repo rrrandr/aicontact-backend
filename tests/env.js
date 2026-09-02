@@ -34,6 +34,8 @@ process.env.APPLE_ISSUER_ID = "test-issuer-id";
 process.env.APPLE_KEY_ID = "TESTKEYID";
 process.env.APPLE_BUNDLE_ID = "com.FaceStreamCorporation.AICONTACT";
 process.env.APPLE_ENVIRONMENT = "Production";
+// Required: an empty allowlist is a refusal, not a wildcard.
+process.env.APPLE_PRODUCT_IDS = "com.facestream.aicontact.monthly";
 
 // A throwaway P-256 key so App Store Server API tokens can actually be signed
 // in tests. Generated per run; never a real Apple key.

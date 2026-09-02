@@ -206,10 +206,26 @@ export const assertEnvironmentAllowed = (environment) => {
   }
 };
 
-/** An allowlist, when configured, so any product under the bundle will not do. */
+/**
+ * Restricts entitlement to products we actually sell.
+ *
+ * An empty list is a refusal, not a wildcard. Treating "unset" as "allow
+ * everything" means a missing or mistyped production variable silently
+ * disables the control, which is the failure mode this exists to prevent.
+ * Boot validation requires the list too, so an empty one should be
+ * unreachable in a running server.
+ */
 export const assertProductAllowed = (productId) => {
   const allowed = config.apple.productIds;
-  if (allowed.length && !allowed.includes(productId)) {
+
+  if (!allowed.length) {
+    throw new AppleVerificationError(
+      "APPLE_PRODUCT_IDS is not configured; refusing to grant entitlement for any product",
+      "apple_unknown_product"
+    );
+  }
+
+  if (!allowed.includes(productId)) {
     throw new AppleVerificationError(
       `Product ${productId} is not one we sell`,
       "apple_unknown_product"

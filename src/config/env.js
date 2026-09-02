@@ -234,6 +234,12 @@ export const assertV2Config = () => {
       "PAYPAL_PLAN_IDS must list at least one plan; without it any PayPal subscription would be accepted."
     );
   }
+
+  if (!config.apple.productIds.length) {
+    throw new Error(
+      "APPLE_PRODUCT_IDS must list at least one product; without it any in-app purchase under the bundle would grant entitlement."
+    );
+  }
 };
 
 export const isProduction = () => config.env === "production";

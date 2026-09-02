@@ -34,7 +34,7 @@ describeIfSsl("Apple environment and product safety", () => {
     global.fetch = realFetch;
     process.env.APPLE_ENVIRONMENT = "Production";
     process.env.APPLE_ALLOW_SANDBOX = "false";
-    process.env.APPLE_PRODUCT_IDS = "";
+    process.env.APPLE_PRODUCT_IDS = "com.facestream.aicontact.monthly";
   });
 
   describe("sandbox purchases must not unlock production", () => {

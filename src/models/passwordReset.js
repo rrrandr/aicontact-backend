@@ -7,6 +7,9 @@ const passwordResetSchema = new mongoose.Schema({
   user_id: { type: mongoose.Schema.Types.ObjectId, ref: "user", index: true },
   created_at: { type: Date, default: Date.now },
   expires_at: { type: Date, required: true, index: { expires: 0 } },
+  // Held while the code is being acted on, cleared if that work fails, so a
+  // transient error does not spend the code.
+  processing_started_at: Date,
   used_at: Date,
 });
 

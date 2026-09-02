@@ -74,9 +74,12 @@ can build the app. The check is applied on every read as well as at creation,
 so a row written while sandbox was permitted stops granting access the moment
 it is not.
 
-`APPLE_PRODUCT_IDS` restricts which products grant entitlement, and the
-transaction is selected by original transaction id rather than by taking the
-first one Apple returns.
+`APPLE_PRODUCT_IDS` restricts which products grant entitlement and is
+**required** when v2 is enabled — the server refuses to start without it, and
+an empty list is treated as a refusal rather than a wildcard, so a missing or
+mistyped setting cannot silently disable the control. The transaction is
+selected by original transaction id rather than by taking the first one Apple
+returns.
 
 The client must be on **Unity IAP 5.x** to produce StoreKit 2 signed
 transactions; 4.11.0 emits legacy receipts this endpoint does not accept.
@@ -113,6 +116,10 @@ they can no longer sign in to stop.
 A PayPal 422 is not read as success: it covers several conditions, only one of
 which is "already inactive". What settles it is reading the subscription back.
 
+Only `CANCELLED`, `EXPIRED`, or a subscription PayPal no longer has satisfies
+deletion. **`SUSPENDED` does not** — suspension pauses collection but leaves
+the billing agreement in place and it can be reactivated.
+
 ### Retention
 
 `purgeExpiredRecords` actually deletes, on a schedule started with the server —
@@ -127,13 +134,37 @@ all single-winner: the condition lives in the update filter rather than in a
 read that precedes it. `tests/v2/concurrency.test.js` fires genuinely parallel
 requests at each.
 
-Refresh rotation has a short grace window (`REFRESH_REUSE_GRACE_MS`) during
-which a second presentation of a just-rotated token is treated as a concurrent
+Refresh rotation writes `revoked_at` and `replaced_by` in a **single**
+conditional update. Setting them separately leaves a window where the token
+looks revoked with no successor — indistinguishable from a deliberate
+revocation — and a loser arriving there would revoke the family the winner had
+just created. If the successor cannot then be written, the consumption is
+compensated so the presented token stays usable.
+
+Rotation has a short grace window (`REFRESH_REUSE_GRACE_MS`) during which a
+second presentation of a just-rotated token is treated as a concurrent
 duplicate rather than a replay — a client with two screens open would otherwise
 be signed out. It does not weaken reuse detection: the loser gets no token
 either way, so the window only decides whether to destroy the session as well.
 Only a rotation sets `replaced_by`, so tokens revoked by logout, password reset
 or family revocation stay a hard failure.
+
+### Single-use codes
+
+Password reset and legacy PayPal claiming take a short **processing lease**
+rather than marking the code used up front. Marking first and working after
+spends the code whenever the work fails — leaving a user with an unchanged
+password and a dead reset link. The code is settled only once the work has
+succeeded, and the lease is released if anything goes wrong.
+
+### A note on transactions
+
+None of the above uses a multi-document transaction. Those require a replica
+set, and the production MongoDB topology is still unknown (see the outstanding
+decisions below). Conditional single-document updates plus explicit
+compensation behave correctly on a standalone server as well, so that is what
+is implemented. If the deployment turns out to be a replica set, these flows
+are the ones worth revisiting.
 
 ### Coexistence with v1
 

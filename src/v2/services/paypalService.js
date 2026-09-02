@@ -130,7 +130,10 @@ export const createSubscription = async ({ planId, customId }) => {
   return { id: body.id, status: body.status, approveUrl: approve ? approve.href : null };
 };
 
-const INACTIVE_STATUSES = new Set(["CANCELLED", "EXPIRED", "SUSPENDED"]);
+// SUSPENDED is deliberately absent. Suspension pauses collection but leaves
+// the billing agreement in place and it can be reactivated, so it does not
+// settle whether someone will be charged again.
+const INACTIVE_STATUSES = new Set(["CANCELLED", "EXPIRED"]);
 
 /**
  * Asks PayPal to cancel, then confirms the result from PayPal's own record.

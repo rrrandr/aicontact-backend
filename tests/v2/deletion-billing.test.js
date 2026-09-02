@@ -131,6 +131,30 @@ describe("account deletion must not leave billing running", () => {
     expect(user.email).toMatch(/@deleted\.invalid$/);
   });
 
+  it("does not accept SUSPENDED as a cancellation", async () => {
+    // Suspension pauses collection; it does not end the billing agreement,
+    // and it can be reactivated. Completing deletion here would detach the
+    // person from a subscription that may start charging again.
+    const tokens = await register("delbill-suspended@example.com");
+
+    const behaviour = () => ({ status: 500, body: {} });
+    behaviour.currentStatus = () => "SUSPENDED";
+    await linkSubscription(
+      tokens,
+      "delbill-suspended@example.com",
+      "I-DELSUSP0001",
+      behaviour
+    );
+
+    const res = await deleteAccount(tokens);
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe("cancellation_unconfirmed");
+
+    const user = await User.findOne({ email_norm: "delbill-suspended@example.com" });
+    expect(user.status).toBe("active");
+  });
+
   it("completes when the subscription was already inactive", async () => {
     const tokens = await register("delbill-already@example.com");
 

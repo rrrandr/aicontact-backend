@@ -30,6 +30,7 @@ import { sendMail } from "../services/mailService";
 import { config } from "../../config/env";
 import crypto from "crypto";
 import { sha256 } from "../../util/crypto";
+import { claimWithLease, settleLease, releaseLease } from "../services/leaseService";
 import { upsertEntitlement, resolveEntitlement } from "../services/entitlementService";
 import { logger } from "../../util/logger";
 
@@ -484,21 +485,17 @@ export const confirmLegacyPaypalClaim = async (req, res, next) => {
         message: "That code is not valid.",
       });
 
-    // Single-winner consumption: the attempt counter and the consumed marker
-    // move in the same conditional update, so a replay or a parallel guess
-    // cannot both succeed.
-    const claim = await PaypalLegacyClaim.findOneAndUpdate(
-      {
-        subscription_id: subscriptionId,
-        user_id: req.user._id,
-        code_hash: sha256(code),
-        consumed_at: { $exists: false },
-        expires_at: { $gt: new Date() },
-        attempts: { $lt: CLAIM_MAX_ATTEMPTS },
-      },
-      { $set: { consumed_at: new Date() } },
-      { new: true }
-    );
+    // Claimed under a lease: still single-winner against a replay or a
+    // parallel guess, but a failure during the PayPal round-trip gives the
+    // code back rather than spending it.
+    const claim = await claimWithLease(PaypalLegacyClaim, {
+      subscription_id: subscriptionId,
+      user_id: req.user._id,
+      code_hash: sha256(code),
+      consumed_at: { $exists: false },
+      expires_at: { $gt: new Date() },
+      attempts: { $lt: CLAIM_MAX_ATTEMPTS },
+    });
 
     if (!claim) {
       await PaypalLegacyClaim.updateOne(
@@ -508,56 +505,71 @@ export const confirmLegacyPaypalClaim = async (req, res, next) => {
       return invalid();
     }
 
-    const subscription = await getSubscription(subscriptionId);
-    if (!subscription || !hasNoBinding(subscription)) return invalid();
+    try {
+      const subscription = await getSubscription(subscriptionId);
 
-    const shape = paypalShape(subscription);
-    if (shape.status !== "active" && shape.status !== "grace") {
-      return res.status(400).json({
-        status: "Error",
-        code: "subscription_not_active",
-        message: `This subscription is ${shape.rawStatus.toLowerCase()}.`,
+      if (!subscription || !hasNoBinding(subscription)) {
+        await releaseLease(PaypalLegacyClaim, claim._id);
+        return invalid();
+      }
+
+      const shape = paypalShape(subscription);
+      if (shape.status !== "active" && shape.status !== "grace") {
+        await releaseLease(PaypalLegacyClaim, claim._id);
+        return res.status(400).json({
+          status: "Error",
+          code: "subscription_not_active",
+          message: `This subscription is ${shape.rawStatus.toLowerCase()}.`,
+        });
+      }
+
+      const claimed = await claimPaypalSubscription(subscriptionId, req.user._id, {
+        plan_id: shape.planId,
+        status: shape.rawStatus,
+        next_billing_time: shape.expiresAt,
+        legacy_claim: true,
+        updated_at: new Date(),
       });
-    }
 
-    const claimed = await claimPaypalSubscription(subscriptionId, req.user._id, {
-      plan_id: shape.planId,
-      status: shape.rawStatus,
-      next_billing_time: shape.expiresAt,
-      legacy_claim: true,
-      updated_at: new Date(),
-    });
+      if (!claimed.ok) {
+        await releaseLease(PaypalLegacyClaim, claim._id);
+        return res.status(409).json({
+          status: "Error",
+          code: "subscription_already_linked",
+          message: "This subscription is already linked to a different account.",
+        });
+      }
 
-    if (!claimed.ok) {
-      return res.status(409).json({
-        status: "Error",
-        code: "subscription_already_linked",
-        message: "This subscription is already linked to a different account.",
+      await upsertEntitlement({
+        user: req.user,
+        platform: "paypal",
+        productId: shape.planId,
+        status: shape.status,
+        startsAt: shape.startsAt,
+        expiresAt: shape.expiresAt,
+        autoRenew: shape.autoRenew,
+        sourceRef: subscriptionId,
       });
+
+      // The subscription is bound and the entitlement written, so the code is
+      // now genuinely spent.
+      await settleLease(PaypalLegacyClaim, claim._id, "consumed_at");
+
+      await AuditLog.create({
+        action: "paypal.legacy_claim_confirmed",
+        user_id: req.user._id,
+        subject_id: req.user.subject_id,
+        detail: { subscription_id: subscriptionId },
+      });
+
+      return res.status(200).json({
+        status: "Success",
+        entitlement: await resolveEntitlement(req.user),
+      });
+    } catch (error) {
+      await releaseLease(PaypalLegacyClaim, claim._id, error);
+      throw error;
     }
-
-    await upsertEntitlement({
-      user: req.user,
-      platform: "paypal",
-      productId: shape.planId,
-      status: shape.status,
-      startsAt: shape.startsAt,
-      expiresAt: shape.expiresAt,
-      autoRenew: shape.autoRenew,
-      sourceRef: subscriptionId,
-    });
-
-    await AuditLog.create({
-      action: "paypal.legacy_claim_confirmed",
-      user_id: req.user._id,
-      subject_id: req.user.subject_id,
-      detail: { subscription_id: subscriptionId },
-    });
-
-    return res.status(200).json({
-      status: "Success",
-      entitlement: await resolveEntitlement(req.user),
-    });
   } catch (error) {
     return next(error);
   }

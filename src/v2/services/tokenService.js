@@ -87,13 +87,21 @@ export const revokeAllForUser = async (userId) => {
 export const rotateRefreshToken = async (presented, context = {}) => {
   const presentedHash = sha256(presented);
 
+  // The successor is minted before the token is consumed so that revoked_at
+  // and replaced_by can be written by the SAME update. Setting them in two
+  // operations leaves a window where the token looks revoked with no
+  // successor - indistinguishable from a deliberate revocation - and a loser
+  // arriving there would revoke the family the winner just created.
+  const next = randomToken(REFRESH_BYTES);
+  const nextHash = sha256(next);
+
   const claimed = await RefreshToken.findOneAndUpdate(
     {
       token_hash: presentedHash,
       revoked_at: { $exists: false },
       expires_at: { $gt: new Date() },
     },
-    { $set: { revoked_at: new Date() } },
+    { $set: { revoked_at: new Date(), replaced_by: nextHash } },
     { new: true }
   );
 
@@ -121,24 +129,34 @@ export const rotateRefreshToken = async (presented, context = {}) => {
     return { ok: false, reason: "expired" };
   }
 
-  const next = randomToken(REFRESH_BYTES);
-  const nextHash = sha256(next);
+  try {
+    await RefreshToken.create({
+      token_hash: nextHash,
+      user_id: claimed.user_id,
+      family_id: claimed.family_id,
+      expires_at: refreshExpiry(),
+      user_agent: context.userAgent,
+      ip_hash: hashIp(context.ip),
+    });
+  } catch (error) {
+    // Compensate: without this a transient write failure would consume the
+    // only token the client holds and leave it with nothing to retry with.
+    //
+    // Deliberately not a multi-document transaction: those require a replica
+    // set, and the production topology is unknown (see README). A conditional
+    // consume plus a compensating release behaves correctly on a standalone
+    // server as well.
+    await RefreshToken.updateOne(
+      { _id: claimed._id, replaced_by: nextHash },
+      { $unset: { revoked_at: 1, replaced_by: 1 } }
+    );
 
-  // replaced_by is written first: it is what a concurrent presentation reads
-  // to tell a rotation apart from a deliberate revocation.
-  await RefreshToken.updateOne(
-    { _id: claimed._id },
-    { $set: { replaced_by: nextHash } }
-  );
-
-  await RefreshToken.create({
-    token_hash: nextHash,
-    user_id: claimed.user_id,
-    family_id: claimed.family_id,
-    expires_at: refreshExpiry(),
-    user_agent: context.userAgent,
-    ip_hash: hashIp(context.ip),
-  });
+    logger.error("refresh rotation rolled back", {
+      family_id: claimed.family_id,
+      error: error.message,
+    });
+    throw error;
+  }
 
   return { ok: true, userId: claimed.user_id, refreshToken: next };
 };
