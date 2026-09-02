@@ -1,44 +1,35 @@
-import express from "express";
-import cors from "cors";
-import bodyParser from "body-parser";
-import dotenv from "dotenv";
-import http from "http";
-import ErrorHandler from "./middlewears/errorHandler";
-import { connectDB } from "./util/db";
-import userRouter from "./routes/userRoutes";
+import { createApp } from "./app";
+import { config } from "./config/env";
+import { connectDB, disconnectDB } from "./util/db";
+import { logger } from "./util/logger";
 
-dotenv.config();
+const start = async () => {
+  // Fail fast. The previous implementation started listening regardless of
+  // whether the database was reachable and reported success either way.
+  await connectDB();
 
-//cors
-const app = express();
-app.use(
-  cors({
-    origin: "*",
-  })
-);
+  const app = createApp();
+  const server = app.listen(config.port, () => {
+    logger.info("aicontact backend listening", {
+      port: config.port,
+      env: config.env,
+    });
+  });
 
-//parse data into json
-app.use(bodyParser.json({ limit: "50mb" }));
-app.use(
-  bodyParser.urlencoded({
-    limit: "50mb",
-    extended: true,
-  })
-);
+  const shutdown = async (signal) => {
+    logger.info("shutting down", { signal });
+    server.close(async () => {
+      await disconnectDB();
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(1), 10000).unref();
+  };
 
-const port = process.env.PORT || 5000;
-connectDB();
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+};
 
-//making path public for accessing pictures
-app.use("/public", express.static("public"));
-
-app.use("/api/user", userRouter);
-
-//Error handling middlewear
-app.use(ErrorHandler);
-
-const server = http.createServer(app);
-
-server.listen(port, () => {
-  console.log(`Snap camera listening at http://localhost:${port}`);
+start().catch((error) => {
+  logger.error("failed to start", { error: error.message });
+  process.exit(1);
 });

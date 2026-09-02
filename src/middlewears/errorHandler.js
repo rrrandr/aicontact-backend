@@ -1,12 +1,27 @@
-// ErrorHandler.js
+import { isProduction } from "../config/env";
+import { logger } from "../util/logger";
+
+// The only error path. Controllers previously called next(error) and then also
+// sent their own 500, which threw ERR_HTTP_HEADERS_SENT on every failure.
 const ErrorHandler = (err, req, res, next) => {
   const errStatus = err.statusCode || 500;
-  const errMsg = err.message || "Something went wrong";
-  res.status(errStatus).json({
+
+  logger.error("request failed", {
+    method: req.method,
+    path: req.path,
+    status: errStatus,
+    error: err.message,
+  });
+
+  if (res.headersSent) return next(err);
+
+  return res.status(errStatus).json({
     success: false,
     status: errStatus,
-    message: errMsg,
-    stack: process.env.NODE_ENV === "development" ? err.stack : {},
+    // Internal failures must not describe themselves to the caller.
+    message:
+      errStatus >= 500 ? "Something went wrong" : err.message || "Request failed",
+    stack: isProduction() ? {} : err.stack,
   });
 };
 

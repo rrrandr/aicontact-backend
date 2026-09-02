@@ -1,0 +1,121 @@
+{
+  "register-new": {
+    "status": 200,
+    "body": {
+      "code": 200,
+      "status": "Success",
+      "message": "User Register successfully!",
+      "user": {
+        "email": "Contract.User@Example.com",
+        "password": "$2a$10$i6yCMwEg/pmUzSDj2HSrtOSTItCW/6cRtUetTVB6g7Dql9rvC7IHe",
+        "subscription_date": null,
+        "terms_accepted": "false",
+        "_id": "6a989d7e69c731babc2ab0f5",
+        "__v": 0
+      }
+    }
+  },
+  "register-duplicate": {
+    "status": 400,
+    "body": {
+      "code": 400,
+      "status": "Error",
+      "message": "Email address already exists!"
+    }
+  },
+  "login-success": {
+    "status": 200,
+    "body": {
+      "code": 200,
+      "status": "Success",
+      "message": "Successfully logedIn",
+      "user": {
+        "_id": "6a989d7e69c731babc2ab0f5",
+        "email": "Contract.User@Example.com",
+        "subscription_date": null,
+        "terms_accepted": "false",
+        "__v": 0
+      }
+    }
+  },
+  "login-wrong-password": {
+    "status": 400,
+    "body": {
+      "code": 400,
+      "status": "Error",
+      "message": "Invalid credentials"
+    }
+  },
+  "login-unknown-email": {
+    "status": 400,
+    "body": {
+      "code": 400,
+      "status": "Error",
+      "message": "Invalid credentials"
+    }
+  },
+  "get-found": {
+    "status": 200,
+    "body": {
+      "code": 200,
+      "status": "Success",
+      "message": "User fetched successfully!",
+      "user": {
+        "_id": "6a989d7e69c731babc2ab0f5",
+        "email": "Contract.User@Example.com",
+        "password": "$2a$10$i6yCMwEg/pmUzSDj2HSrtOSTItCW/6cRtUetTVB6g7Dql9rvC7IHe",
+        "subscription_date": null,
+        "terms_accepted": "false",
+        "__v": 0
+      }
+    }
+  },
+  "get-not-found": {
+    "status": 400,
+    "body": {
+      "code": 400,
+      "status": "Error",
+      "message": "Email address not found!"
+    }
+  },
+  "update-subscription": {
+    "status": 200,
+    "body": {
+      "code": 200,
+      "status": "Success",
+      "message": "User date updated!",
+      "user": {
+        "_id": "6a989d7e69c731babc2ab0f5",
+        "email": "Contract.User@Example.com",
+        "password": "$2a$10$i6yCMwEg/pmUzSDj2HSrtOSTItCW/6cRtUetTVB6g7Dql9rvC7IHe",
+        "subscription_date": "01/02/2026 10:30:00",
+        "terms_accepted": "false",
+        "__v": 0
+      }
+    }
+  },
+  "update-terms": {
+    "status": 200,
+    "body": {
+      "code": 200,
+      "status": "Success",
+      "message": "User date updated!",
+      "user": {
+        "_id": "6a989d7e69c731babc2ab0f5",
+        "email": "Contract.User@Example.com",
+        "password": "$2a$10$i6yCMwEg/pmUzSDj2HSrtOSTItCW/6cRtUetTVB6g7Dql9rvC7IHe",
+        "subscription_date": "01/02/2026 10:30:00",
+        "terms_accepted": "true",
+        "__v": 0
+      }
+    }
+  },
+  "update-not-found": {
+    "status": 400,
+    "body": {
+      "code": 400,
+      "status": "Error",
+      "message": "Email address not found!"
+    }
+  }
+}

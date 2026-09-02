@@ -1,136 +1,213 @@
-import { User } from "../models/user";
 import bcrypt from "bcryptjs";
+import { User, PUBLIC_FIELDS } from "../models/user";
+import { EntitlementAudit } from "../models/entitlementAudit";
+import { isValidEmail, normalizeEmail } from "../util/email";
+import { logger } from "../util/logger";
+
+/**
+ * v1 controllers. Two released applications depend on these response bodies,
+ * so every success payload here - including its typos - is preserved verbatim.
+ * See tests/contract for the assertions that hold this contract in place.
+ */
+
+// Exact match first, so behaviour is unchanged for any row the backfill has
+// not reached yet; the normalized index is only consulted as a fallback. This
+// can only ever find more users than the original lookup, never fewer.
+const findByEmail = async (rawEmail, projection = PUBLIC_FIELDS) => {
+  if (typeof rawEmail !== "string" || !rawEmail) return null;
+
+  const exact = await User.findOne({ email: rawEmail }).select(projection);
+  if (exact) return exact;
+
+  const norm = normalizeEmail(rawEmail);
+  if (!norm) return null;
+
+  return User.findOne({ email_norm: norm }).select(projection);
+};
 
 // Register User
 export const createUser = async (req, res, next) => {
   try {
-    const userData = req.body;
-    const findUser = await User.findOne({ email: userData?.email });
-    if(findUser){
-      res.status(400).json({
+    const { email, password, terms_accepted } = req.body ?? {};
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({
         code: 400,
         status: "Error",
-        message: "Email address already exists!"
+        message: "Please fill a valid email address",
       });
-  } else {
+    }
+
+    if (typeof password !== "string" || password.length < 8) {
+      return res.status(400).json({
+        code: 400,
+        status: "Error",
+        message: "Password must be at least 8 characters.",
+      });
+    }
+
+    const findUser = await findByEmail(email);
+    if (findUser) {
+      return res.status(400).json({
+        code: 400,
+        status: "Error",
+        message: "Email address already exists!",
+      });
+    }
+
     const salt = await bcrypt.genSalt(10);
-    userData.password = await bcrypt.hash(req.body.password, salt);
-    const user = await User.create(userData);
-    res.status(200).json({
+
+    // Whitelist. The previous implementation passed the raw request body to
+    // User.create, so a client could set subscription_date at signup and
+    // grant itself a paid entitlement.
+    const user = await User.create({
+      email: email.trim(),
+      email_norm: normalizeEmail(email),
+      password: await bcrypt.hash(password, salt),
+      terms_accepted:
+        terms_accepted === "true" || terms_accepted === true ? "true" : "false",
+    });
+
+    return res.status(200).json({
       code: 200,
       status: "Success",
       message: "User Register successfully!",
       user,
     });
-  }
   } catch (error) {
-    next(error);
-    res.status(500).json({ code: 500, status: "Error", error });
+    return next(error);
   }
 };
 
 // Login User
 export const userLogin = async (req, res, next) => {
   try {
-    const { email, password } = req.body;
-    const user = await User.findOne({ email: email });
-    if (user) {
-      const verifyPassword = await bcrypt.compare(password, user.password);
-      if (verifyPassword) {
-        const userObject = user.toObject();
-        delete userObject.password;
-        res.status(200).json({
-          code: 200,
-          status: "Success",
-          message: "Successfully logedIn",
-          user: userObject,
-          // token,
-        });
-      } else {
-        res.status(400).json({
-          code: 400,
-          status: "Error",
-          message: "Invalid credentials",
-        });
-      }
-    } else {
+    const { email, password } = req.body ?? {};
+
+    // A single failure shape for "no such account" and "wrong password", so
+    // login cannot be used to enumerate registered addresses.
+    const invalid = () =>
       res.status(400).json({
         code: 400,
         status: "Error",
         message: "Invalid credentials",
       });
+
+    if (typeof email !== "string" || typeof password !== "string") {
+      return invalid();
     }
+
+    const user = await findByEmail(email, "+password");
+    if (!user) return invalid();
+
+    const verifyPassword = await bcrypt.compare(password, user.password);
+    if (!verifyPassword) return invalid();
+
+    const userObject = user.toObject();
+
+    return res.status(200).json({
+      code: 200,
+      status: "Success",
+      message: "Successfully logedIn",
+      user: userObject,
+    });
   } catch (error) {
-    next(error);
-    res.status(500).json({ code: 500, status: "Error", error });
+    return next(error);
   }
 };
 
 // Update User Data
-
 export const userUpdate = async (req, res, next) => {
   try {
-    const saveData = req.body;
-    let user = await User.findOne({ email: saveData.email });
-    if (user) {
-      const allowedUpdates = {};
-      if (saveData.subscription_date !== null) {
-        allowedUpdates.subscription_date = saveData.subscription_date;
-      }
-      if (saveData.terms_accepted !== null) {
-        allowedUpdates.terms_accepted = saveData.terms_accepted === 'true' || saveData.terms_accepted === true;
-      }
-      if (Object.keys(allowedUpdates).length === 0) {
-        return res.status(400).json({
-          code: 400,
-          status: "Error",
-          message: "No valid fields to update.",
-        });
-      }
-      await User.findOneAndUpdate(
-        { email: saveData.email },
-        { $set: allowedUpdates },
-      );
-      user = await User.findOne({ email: saveData.email });
-      res.status(200).json({
-        code: 200,
-        status: "Success",
-        message: "User date updated!",
-        user,
-      });
-    } else {
-      res.status(400).json({
+    const saveData = req.body ?? {};
+
+    const user = await findByEmail(saveData.email);
+    if (!user) {
+      return res.status(400).json({
         code: 400,
         status: "Error",
         message: "Email address not found!",
       });
     }
+
+    // Released clients serialize their whole DTO, sending explicit nulls for
+    // fields they are not setting, so null means "leave alone". Checking
+    // undefined as well makes the empty-request branch reachable, which it
+    // was not before.
+    const allowedUpdates = {};
+    const wantsSubscription =
+      saveData.subscription_date !== null &&
+      saveData.subscription_date !== undefined;
+    if (wantsSubscription) {
+      allowedUpdates.subscription_date = saveData.subscription_date;
+    }
+    if (saveData.terms_accepted !== null && saveData.terms_accepted !== undefined) {
+      allowedUpdates.terms_accepted = String(
+        saveData.terms_accepted === "true" || saveData.terms_accepted === true
+      );
+    }
+
+    if (Object.keys(allowedUpdates).length === 0) {
+      return res.status(400).json({
+        code: 400,
+        status: "Error",
+        message: "No valid fields to update.",
+      });
+    }
+
+    // This endpoint is unauthenticated and cannot be closed without breaking
+    // released clients, so entitlement writes are recorded for review. The
+    // audit is best-effort and must never fail the request.
+    if (wantsSubscription) {
+      try {
+        await EntitlementAudit.create({
+          email_norm: normalizeEmail(saveData.email),
+          previous_subscription_date: user.subscription_date,
+          next_subscription_date: String(saveData.subscription_date),
+          ip: req.ip,
+          user_agent: req.get("user-agent"),
+        });
+      } catch (auditError) {
+        logger.error("entitlement audit write failed", {
+          error: auditError.message,
+        });
+      }
+    }
+
+    await User.updateOne({ _id: user._id }, { $set: allowedUpdates });
+    const updated = await User.findById(user._id).select(PUBLIC_FIELDS);
+
+    return res.status(200).json({
+      code: 200,
+      status: "Success",
+      message: "User date updated!",
+      user: updated,
+    });
   } catch (error) {
-    next(error);
-    res.status(500).json({ code: 500, status: "Error", error });
+    return next(error);
   }
 };
 
-//get all users
+// Get a single user by email
 export const getUser = async (req, res, next) => {
   try {
-    const user = await User.findOne({ email: req.params.email });
-    if (user) {
-      res.status(200).json({
-        code: 200,
-        status: "Success",
-        message: "User fetched successfully!",
-        user,
-      });
-    }
-    else {
-      res.status(400).json({
+    const user = await findByEmail(req.params.email);
+
+    if (!user) {
+      return res.status(400).json({
         code: 400,
         status: "Error",
         message: "Email address not found!",
       });
     }
+
+    return res.status(200).json({
+      code: 200,
+      status: "Success",
+      message: "User fetched successfully!",
+      user,
+    });
   } catch (error) {
-    next(error);
+    return next(error);
   }
 };
