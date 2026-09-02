@@ -169,10 +169,13 @@ describeIfSsl("entitlements", () => {
   describe("paypal", () => {
     it("links an active subscription and grants entitlement", async () => {
       const tokens = await register("ent-pp1@example.com");
+      const user = await User.findOne({ email_norm: "ent-pp1@example.com" });
 
       installFetchStub({
         ...paypalAuthRoute,
-        "/v1/billing/subscriptions/": { body: paypalSubscription() },
+        "/v1/billing/subscriptions/": {
+          body: paypalSubscription({ custom_id: user.subject_id }),
+        },
       });
 
       const res = await authed(
@@ -185,16 +188,18 @@ describeIfSsl("entitlements", () => {
       expect(res.body.entitlement.platform).toBe("paypal");
     });
 
-    it("refuses a subscription already bound to another account", async () => {
-      // The desktop client's entitlement model let any known subscription ID
-      // unlock any installation. Exclusive binding is the fix.
+    it("refuses a subscription belonging to another account", async () => {
+      // The desktop client's model let any known subscription ID unlock any
+      // installation. Ownership now comes from the custom_id the server set
+      // at creation, so presenting someone else's ID proves nothing.
       const owner = await register("ent-pp-owner@example.com");
       const other = await register("ent-pp-other@example.com");
+      const ownerUser = await User.findOne({ email_norm: "ent-pp-owner@example.com" });
 
       installFetchStub({
         ...paypalAuthRoute,
         "/v1/billing/subscriptions/": {
-          body: paypalSubscription({ id: "I-SHARED00001" }),
+          body: paypalSubscription({ id: "I-SHARED00001", custom_id: ownerUser.subject_id }),
         },
       });
 
@@ -209,8 +214,8 @@ describeIfSsl("entitlements", () => {
         other
       ).send({ subscription_id: "I-SHARED00001" });
 
-      expect(second.status).toBe(409);
-      expect(second.body.code).toBe("subscription_already_linked");
+      expect(second.status).toBe(403);
+      expect(second.body.code).toBe("paypal_ownership_unverified");
     });
 
     it("refuses a subscription for a plan we do not sell", async () => {
@@ -234,11 +239,16 @@ describeIfSsl("entitlements", () => {
 
     it("refuses a cancelled subscription", async () => {
       const tokens = await register("ent-pp-cancelled@example.com");
+      const user = await User.findOne({ email_norm: "ent-pp-cancelled@example.com" });
 
       installFetchStub({
         ...paypalAuthRoute,
         "/v1/billing/subscriptions/": {
-          body: paypalSubscription({ id: "I-CANCELLED1", status: "CANCELLED" }),
+          body: paypalSubscription({
+            id: "I-CANCELLED1",
+            custom_id: user.subject_id,
+            status: "CANCELLED",
+          }),
         },
       });
 
@@ -269,10 +279,13 @@ describeIfSsl("entitlements", () => {
 
     it("never sends PayPal credentials to the client", async () => {
       const tokens = await register("ent-pp-secrets@example.com");
+      const user = await User.findOne({ email_norm: "ent-pp-secrets@example.com" });
 
       installFetchStub({
         ...paypalAuthRoute,
-        "/v1/billing/subscriptions/": { body: paypalSubscription({ id: "I-SECRETS0001" }) },
+        "/v1/billing/subscriptions/": {
+          body: paypalSubscription({ id: "I-SECRETS0001", custom_id: user.subject_id }),
+        },
       });
 
       const res = await authed(

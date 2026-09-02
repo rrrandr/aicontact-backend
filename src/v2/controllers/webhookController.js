@@ -6,9 +6,14 @@ import { User } from "../../models/user";
 import {
   verifySignedPayload,
   assertBundleId,
+  environmentAllowed,
   AppleVerificationError,
 } from "../services/appleService";
-import { verifyWebhookSignature, toEntitlementShape } from "../services/paypalService";
+import {
+  verifyWebhookSignature,
+  toEntitlementShape,
+  getSubscription,
+} from "../services/paypalService";
 import { upsertEntitlement } from "../services/entitlementService";
 import { logger } from "../../util/logger";
 
@@ -23,16 +28,46 @@ import { logger } from "../../util/logger";
  * A 500 is reserved for failures a retry genuinely might resolve.
  */
 
-const firstSeen = async (provider, eventId, eventType) => {
+// How long a processor may hold an event before another may take it over.
+// Only matters if a process dies mid-handler; ordinary failures release the
+// lease immediately.
+const LEASE_MS = 60 * 1000;
+
+/**
+ * Takes exclusive ownership of an event for processing.
+ *
+ * Recording the event and then processing it loses any delivery that fails
+ * afterwards: the provider retries, the insert reports a duplicate, and the
+ * event is acknowledged without ever having been handled. Instead the claim
+ * matches only events that are not yet finished, so a failed delivery can be
+ * retried while a concurrent one still cannot start.
+ */
+const claimEvent = async (provider, eventId, eventType) => {
+  const now = new Date();
+  const staleBefore = new Date(now.getTime() - LEASE_MS);
+
   try {
-    await WebhookEvent.create({
-      provider,
-      event_id: eventId,
-      event_type: eventType,
-    });
+    await WebhookEvent.findOneAndUpdate(
+      {
+        provider,
+        event_id: eventId,
+        processed_at: { $exists: false },
+        $or: [
+          { processing_started_at: { $exists: false } },
+          { processing_started_at: null },
+          { processing_started_at: { $lte: staleBefore } },
+        ],
+      },
+      {
+        $set: { event_type: eventType, processing_started_at: now },
+        $inc: { attempts: 1 },
+        $setOnInsert: { received_at: now },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
     return true;
   } catch (error) {
-    // Duplicate key: we have seen this event before.
+    // Duplicate key: the event is either finished or being processed now.
     if (error.code === 11000) return false;
     throw error;
   }
@@ -41,7 +76,16 @@ const firstSeen = async (provider, eventId, eventType) => {
 const complete = (provider, eventId, outcome) =>
   WebhookEvent.updateOne(
     { provider, event_id: eventId },
-    { $set: { processed_at: new Date(), outcome } }
+    { $set: { processed_at: new Date(), outcome }, $unset: { processing_started_at: 1 } }
+  );
+
+// Releases the lease so the provider's retry is processed rather than being
+// mistaken for a duplicate.
+const release = (provider, eventId, error) =>
+  WebhookEvent.updateOne(
+    { provider, event_id: eventId },
+    { $set: { last_error: String(error && error.message).slice(0, 500) },
+      $unset: { processing_started_at: 1 } }
   );
 
 // Apple notification types mapped onto entitlement status.
@@ -83,10 +127,12 @@ export const appleWebhook = async (req, res, next) => {
       return res.status(400).json({ status: "Error", message: "Missing notificationUUID" });
     }
 
-    if (!(await firstSeen("apple", eventId, notification.notificationType))) {
+    if (!(await claimEvent("apple", eventId, notification.notificationType))) {
       logger.info("apple webhook duplicate ignored", { event_id: eventId });
       return res.status(200).json({ status: "Success", duplicate: true });
     }
+
+    try {
 
     const data = notification.data || {};
     const transaction = data.signedTransactionInfo
@@ -135,6 +181,17 @@ export const appleWebhook = async (req, res, next) => {
       return res.status(200).json({ status: "Success", ignored: true });
     }
 
+    // The same environment policy as the verify endpoint. A sandbox
+    // notification must not be able to activate a production entitlement.
+    if (mapped && !environmentAllowed(data.environment)) {
+      logger.warn("apple webhook ignored for disallowed environment", {
+        environment: data.environment,
+        event_id: eventId,
+      });
+      await complete("apple", eventId, "environment-rejected");
+      return res.status(200).json({ status: "Success", ignored: true });
+    }
+
     if (mapped) {
       await upsertEntitlement({
         user,
@@ -168,23 +225,47 @@ export const appleWebhook = async (req, res, next) => {
       }
     );
 
-    await complete("apple", eventId, notification.notificationType);
-    return res.status(200).json({ status: "Success" });
+      await complete("apple", eventId, notification.notificationType);
+      return res.status(200).json({ status: "Success" });
+    } catch (error) {
+      // Release the claim so Apple's retry is processed rather than being
+      // dismissed as a duplicate, then let the error produce a 5xx.
+      await release("apple", eventId, error);
+      throw error;
+    }
   } catch (error) {
-    // A retry might succeed here, so let the provider retry.
     return next(error);
   }
 };
 
-const PAYPAL_STATUS = {
-  "BILLING.SUBSCRIPTION.ACTIVATED": "active",
-  "BILLING.SUBSCRIPTION.RE-ACTIVATED": "active",
-  "BILLING.SUBSCRIPTION.UPDATED": "active",
-  "BILLING.SUBSCRIPTION.SUSPENDED": "grace",
-  "BILLING.SUBSCRIPTION.CANCELLED": "expired",
-  "BILLING.SUBSCRIPTION.EXPIRED": "expired",
-  "BILLING.SUBSCRIPTION.PAYMENT.FAILED": "grace",
-};
+/**
+ * Event types that affect entitlement.
+ *
+ * The value is only used to decide whether we care; the resulting status
+ * always comes from PayPal's own record, never from the event body.
+ */
+const PAYPAL_HANDLED = new Set([
+  "BILLING.SUBSCRIPTION.ACTIVATED",
+  "BILLING.SUBSCRIPTION.RE-ACTIVATED",
+  "BILLING.SUBSCRIPTION.UPDATED",
+  "BILLING.SUBSCRIPTION.SUSPENDED",
+  "BILLING.SUBSCRIPTION.CANCELLED",
+  "BILLING.SUBSCRIPTION.EXPIRED",
+  "BILLING.SUBSCRIPTION.PAYMENT.FAILED",
+  // Renewals. Without these, next_billing_time goes stale and a paying
+  // subscriber loses access on their next billing date.
+  "PAYMENT.SALE.COMPLETED",
+  "PAYMENT.SALE.DENIED",
+  "PAYMENT.SALE.REFUNDED",
+  "PAYMENT.SALE.REVERSED",
+]);
+
+// Subscription events carry the id directly; payment events reference it as
+// the billing agreement.
+const paypalSubscriptionId = (event) =>
+  event.resource?.id && String(event.event_type || "").startsWith("BILLING.SUBSCRIPTION")
+    ? event.resource.id
+    : event.resource?.billing_agreement_id || null;
 
 export const paypalWebhook = async (req, res, next) => {
   try {
@@ -202,58 +283,72 @@ export const paypalWebhook = async (req, res, next) => {
       return res.status(400).json({ status: "Error", message: "Missing event id" });
     }
 
-    if (!(await firstSeen("paypal", eventId, event.event_type))) {
+    if (!(await claimEvent("paypal", eventId, event.event_type))) {
       logger.info("paypal webhook duplicate ignored", { event_id: eventId });
       return res.status(200).json({ status: "Success", duplicate: true });
     }
 
-    const subscriptionId = event.resource?.id;
-    const mapped = PAYPAL_STATUS[event.event_type];
+    try {
+      const subscriptionId = paypalSubscriptionId(event);
 
-    if (!subscriptionId || !mapped) {
-      await complete("paypal", eventId, "ignored");
-      return res.status(200).json({ status: "Success", ignored: true });
-    }
-
-    const record = await PaypalSubscription.findOne({ subscription_id: subscriptionId });
-
-    if (!record || !record.user_id) {
-      await complete("paypal", eventId, "unlinked-subscription");
-      return res.status(200).json({ status: "Success", unlinked: true });
-    }
-
-    const user = await User.findById(record.user_id);
-    if (!user) {
-      await complete("paypal", eventId, "user-missing");
-      return res.status(200).json({ status: "Success", ignored: true });
-    }
-
-    const shape = toEntitlementShape(event.resource);
-
-    await PaypalSubscription.updateOne(
-      { subscription_id: subscriptionId },
-      {
-        $set: {
-          status: event.resource?.status || shape.rawStatus,
-          next_billing_time: shape.expiresAt,
-          updated_at: new Date(),
-        },
+      if (!subscriptionId || !PAYPAL_HANDLED.has(event.event_type)) {
+        await complete("paypal", eventId, "ignored");
+        return res.status(200).json({ status: "Success", ignored: true });
       }
-    );
 
-    await upsertEntitlement({
-      user,
-      platform: "paypal",
-      productId: record.plan_id || shape.planId,
-      status: mapped,
-      startsAt: shape.startsAt,
-      expiresAt: shape.expiresAt,
-      autoRenew: mapped === "active",
-      sourceRef: subscriptionId,
-    });
+      const record = await PaypalSubscription.findOne({ subscription_id: subscriptionId });
 
-    await complete("paypal", eventId, event.event_type);
-    return res.status(200).json({ status: "Success" });
+      if (!record || !record.user_id) {
+        await complete("paypal", eventId, "unlinked-subscription");
+        return res.status(200).json({ status: "Success", unlinked: true });
+      }
+
+      const user = await User.findById(record.user_id);
+      if (!user) {
+        await complete("paypal", eventId, "user-missing");
+        return res.status(200).json({ status: "Success", ignored: true });
+      }
+
+      // Authoritative refresh. The event body is a notification, not a source
+      // of truth - it can be stale, reordered, or describe a payment whose
+      // subscription has since been cancelled.
+      const subscription = await getSubscription(subscriptionId);
+
+      if (!subscription) {
+        await complete("paypal", eventId, "subscription-missing");
+        return res.status(200).json({ status: "Success", ignored: true });
+      }
+
+      const shape = toEntitlementShape(subscription);
+
+      await PaypalSubscription.updateOne(
+        { subscription_id: subscriptionId },
+        {
+          $set: {
+            status: shape.rawStatus,
+            next_billing_time: shape.expiresAt,
+            updated_at: new Date(),
+          },
+        }
+      );
+
+      await upsertEntitlement({
+        user,
+        platform: "paypal",
+        productId: record.plan_id || shape.planId,
+        status: shape.status,
+        startsAt: shape.startsAt,
+        expiresAt: shape.expiresAt,
+        autoRenew: shape.autoRenew,
+        sourceRef: subscriptionId,
+      });
+
+      await complete("paypal", eventId, event.event_type);
+      return res.status(200).json({ status: "Success" });
+    } catch (error) {
+      await release("paypal", eventId, error);
+      throw error;
+    }
   } catch (error) {
     return next(error);
   }

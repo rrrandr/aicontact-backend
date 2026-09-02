@@ -143,20 +143,51 @@ describe("refresh token rotation", () => {
       .post("/api/v2/auth/refresh")
       .send({ refresh_token: tokens.refresh_token });
 
-    expect(replay.status).toBe(401);
-    expect(replay.body.code).toBe("token_reused");
+    // Immediately after a rotation this reads as a concurrent duplicate; the
+    // aged case below is what triggers reuse detection.
+    expect(replay.status).toBe(409);
+    expect(replay.body.code).toBe("refresh_in_progress");
   });
 
-  it("revokes the whole family when a rotated token is replayed", async () => {
-    // Replay means the value leaked. Signing the legitimate holder out too is
-    // the correct trade against leaving an attacker with a live session.
+  it("treats an immediate second presentation as a concurrent duplicate", async () => {
+    // A client with two screens open refreshes twice at once. Only one token
+    // is issued, but the session must survive.
     const rotated = await request(app)
       .post("/api/v2/auth/refresh")
       .send({ refresh_token: tokens.refresh_token });
 
-    await request(app)
+    const duplicate = await request(app)
       .post("/api/v2/auth/refresh")
       .send({ refresh_token: tokens.refresh_token });
+
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.body.code).toBe("refresh_in_progress");
+
+    const stillWorks = await request(app)
+      .post("/api/v2/auth/refresh")
+      .send({ refresh_token: rotated.body.refresh_token });
+    expect(stillWorks.status).toBe(200);
+  });
+
+  it("revokes the whole family when a rotated token is replayed later", async () => {
+    // Beyond the grace window, holding a token that has already been rotated
+    // means the value leaked. Signing the legitimate holder out too is the
+    // correct trade against leaving an attacker with a live session.
+    const rotated = await request(app)
+      .post("/api/v2/auth/refresh")
+      .send({ refresh_token: tokens.refresh_token });
+
+    // Age the rotation past the grace window.
+    await RefreshToken.updateMany(
+      { revoked_at: { $exists: true } },
+      { $set: { revoked_at: new Date(Date.now() - 60 * 60 * 1000) } }
+    );
+
+    const replay = await request(app)
+      .post("/api/v2/auth/refresh")
+      .send({ refresh_token: tokens.refresh_token });
+    expect(replay.status).toBe(401);
+    expect(replay.body.code).toBe("token_reused");
 
     const afterBreach = await request(app)
       .post("/api/v2/auth/refresh")

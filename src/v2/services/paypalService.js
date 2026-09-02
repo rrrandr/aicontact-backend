@@ -90,30 +90,108 @@ export const getSubscription = async (subscriptionId) => {
   return response.json();
 };
 
-export const cancelSubscription = async (subscriptionId, reason) => {
-  const response = await fetch(
-    `${host()}/v1/billing/subscriptions/${encodeURIComponent(subscriptionId)}/cancel`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${await accessToken()}`,
-        "Content-Type": "application/json",
+/**
+ * Creates a subscription with the account binding set by us.
+ *
+ * custom_id comes from the session, never from the request body, and PayPal
+ * echoes it back on lookup - which is what makes ownership verifiable rather
+ * than merely asserted.
+ */
+export const createSubscription = async ({ planId, customId }) => {
+  const response = await fetch(`${host()}/v1/billing/subscriptions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${await accessToken()}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify({
+      plan_id: planId,
+      custom_id: customId,
+      application_context: {
+        user_action: "SUBSCRIBE_NOW",
+        ...(config.paypal.returnUrl ? { return_url: config.paypal.returnUrl } : {}),
+        ...(config.paypal.cancelUrl ? { cancel_url: config.paypal.cancelUrl } : {}),
       },
-      body: JSON.stringify({ reason: reason || "Account deleted" }),
-    }
-  );
+    }),
+  });
 
-  // 204 on success; 422 when it is already inactive, which is not an error
-  // from our point of view.
-  if (!response.ok && response.status !== 422) {
-    logger.warn("paypal cancellation failed", {
-      subscription_id: subscriptionId,
-      status: response.status,
-    });
-    return false;
+  if (!response.ok) {
+    throw new PaypalError(
+      `PayPal subscription creation failed (${response.status})`,
+      "paypal_create_failed",
+      502
+    );
   }
 
-  return true;
+  const body = await response.json();
+  const approve = (body.links || []).find((link) => link.rel === "approve");
+
+  return { id: body.id, status: body.status, approveUrl: approve ? approve.href : null };
+};
+
+const INACTIVE_STATUSES = new Set(["CANCELLED", "EXPIRED", "SUSPENDED"]);
+
+/**
+ * Asks PayPal to cancel, then confirms the result from PayPal's own record.
+ *
+ * The response status alone is not proof. 422 in particular covers several
+ * conditions - only one of which is "already inactive" - so treating every
+ * 422 as success silently strands a subscription that is still billing.
+ * What settles it is reading the subscription back.
+ */
+export const cancelSubscription = async (subscriptionId, reason) => {
+  let requestError = null;
+
+  try {
+    const response = await fetch(
+      `${host()}/v1/billing/subscriptions/${encodeURIComponent(subscriptionId)}/cancel`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${await accessToken()}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ reason: reason || "Account deleted" }),
+      }
+    );
+
+    if (!response.ok) {
+      requestError = `cancel returned ${response.status}`;
+      logger.warn("paypal cancellation call did not succeed", {
+        subscription_id: subscriptionId,
+        status: response.status,
+      });
+    }
+  } catch (error) {
+    requestError = error.message;
+  }
+
+  // Confirm against PayPal rather than trusting the call's status code.
+  try {
+    const subscription = await getSubscription(subscriptionId);
+
+    if (!subscription) {
+      return { cancelled: true, confirmed: true, detail: "subscription no longer exists" };
+    }
+
+    const status = String(subscription.status || "").toUpperCase();
+    if (INACTIVE_STATUSES.has(status)) {
+      return { cancelled: true, confirmed: true, detail: status };
+    }
+
+    return {
+      cancelled: false,
+      confirmed: true,
+      detail: `still ${status}${requestError ? ` (${requestError})` : ""}`,
+    };
+  } catch (error) {
+    return {
+      cancelled: false,
+      confirmed: false,
+      detail: requestError || error.message,
+    };
+  }
 };
 
 /**
@@ -206,6 +284,22 @@ export const toEntitlementShape = (subscription) => {
     autoRenew: status === "ACTIVE",
   };
 };
+
+/**
+ * Whether this subscription is bound to this account.
+ *
+ * A subscription id is not a secret - it appears in receipts, customer emails
+ * and PayPal's own interface - so presenting one proves nothing. Only the
+ * custom_id we set at creation does.
+ */
+export const ownershipMatches = (subscription, subjectId) =>
+  Boolean(subjectId) && subscription?.custom_id === subjectId;
+
+export const hasNoBinding = (subscription) =>
+  !subscription?.custom_id || String(subscription.custom_id).trim() === "";
+
+export const subscriberEmail = (subscription) =>
+  subscription?.subscriber?.email_address || null;
 
 /** A subscription for a plan we do not sell must never grant entitlement. */
 export const assertKnownPlan = (planId) => {

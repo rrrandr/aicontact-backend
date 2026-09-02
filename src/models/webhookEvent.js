@@ -7,6 +7,11 @@ const webhookEventSchema = new mongoose.Schema({
   event_id: { type: String, required: true },
   event_type: String,
   received_at: { type: Date, default: Date.now },
+  // Set when a processor takes the event, cleared if processing fails, so a
+  // provider retry can pick it up again.
+  processing_started_at: Date,
+  attempts: { type: Number, default: 0 },
+  last_error: String,
   processed_at: Date,
   outcome: String,
 });

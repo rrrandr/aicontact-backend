@@ -68,40 +68,77 @@ export const revokeAllForUser = async (userId) => {
 /**
  * Rotation with reuse detection.
  *
- * A refresh token is single use. Being presented one that has already been
- * rotated means the value leaked, so every token in its lineage is revoked -
- * the legitimate holder is signed out too, which is the correct outcome when
- * the alternative is leaving an attacker with a valid session.
+ * The presented token is consumed by an atomic conditional update: only the
+ * request whose update matches `revoked_at: { $exists: false }` proceeds, so
+ * simultaneous rotations cannot each mint a successor and leave several live
+ * tokens behind. Reading first and writing after loses that race.
+ *
+ * A token that exists but is already revoked normally means the value leaked,
+ * so the whole lineage is revoked - the legitimate holder is signed out too,
+ * which is the right trade against leaving an attacker with a live session.
+ *
+ * The exception is a presentation that arrives within a short grace window of
+ * the rotation that consumed it. A client with two screens open fires two
+ * refreshes at once; punishing that signs real users out for no reason. This
+ * does not weaken reuse detection: the single-winner update means a loser
+ * receives no token whether it is the real client or an attacker, so the only
+ * thing the window decides is whether to destroy the session as well.
  */
 export const rotateRefreshToken = async (presented, context = {}) => {
-  const stored = await RefreshToken.findOne({ token_hash: sha256(presented) });
+  const presentedHash = sha256(presented);
 
-  if (!stored) return { ok: false, reason: "unknown" };
+  const claimed = await RefreshToken.findOneAndUpdate(
+    {
+      token_hash: presentedHash,
+      revoked_at: { $exists: false },
+      expires_at: { $gt: new Date() },
+    },
+    { $set: { revoked_at: new Date() } },
+    { new: true }
+  );
 
-  if (stored.revoked_at) {
-    await revokeFamily(stored.family_id, "reuse-detected");
-    return { ok: false, reason: "reused" };
-  }
+  if (!claimed) {
+    const existing = await RefreshToken.findOne({ token_hash: presentedHash });
 
-  if (stored.expires_at.getTime() <= Date.now()) {
+    if (!existing) return { ok: false, reason: "unknown" };
+
+    if (existing.revoked_at) {
+      const age = Date.now() - existing.revoked_at.getTime();
+
+      // Only a rotation sets replaced_by. Tokens revoked by logout, password
+      // reset, or family revocation carry no successor and must stay a hard
+      // failure - the grace window is for concurrency, not for reviving a
+      // session that was deliberately ended.
+      if (existing.replaced_by && age <= config.auth.reuseGraceMs) {
+        logger.info("concurrent refresh ignored", { family_id: existing.family_id });
+        return { ok: false, reason: "concurrent" };
+      }
+
+      await revokeFamily(existing.family_id, "reuse-detected");
+      return { ok: false, reason: "reused" };
+    }
+
     return { ok: false, reason: "expired" };
   }
 
   const next = randomToken(REFRESH_BYTES);
   const nextHash = sha256(next);
 
+  // replaced_by is written first: it is what a concurrent presentation reads
+  // to tell a rotation apart from a deliberate revocation.
+  await RefreshToken.updateOne(
+    { _id: claimed._id },
+    { $set: { replaced_by: nextHash } }
+  );
+
   await RefreshToken.create({
     token_hash: nextHash,
-    user_id: stored.user_id,
-    family_id: stored.family_id,
+    user_id: claimed.user_id,
+    family_id: claimed.family_id,
     expires_at: refreshExpiry(),
     user_agent: context.userAgent,
     ip_hash: hashIp(context.ip),
   });
 
-  stored.revoked_at = new Date();
-  stored.replaced_by = nextHash;
-  await stored.save();
-
-  return { ok: true, userId: stored.user_id, refreshToken: next };
+  return { ok: true, userId: claimed.user_id, refreshToken: next };
 };

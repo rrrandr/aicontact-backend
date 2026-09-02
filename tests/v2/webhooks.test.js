@@ -182,10 +182,16 @@ describeIfSsl("webhooks", () => {
       },
     });
 
-    const linkPaypal = async (tokens, subscriptionId) => {
+    // Ownership is proved by custom_id, which the server sets when it creates
+    // the subscription. Without it the link is refused and these tests would
+    // silently exercise the unlinked path instead.
+    const linkPaypal = async (tokens, subscriptionId, email) => {
+      const user = await User.findOne({ email_norm: email });
       installFetchStub({
         ...paypalAuthRoute,
-        "/v1/billing/subscriptions/": { body: paypalSubscription({ id: subscriptionId }) },
+        "/v1/billing/subscriptions/": {
+          body: paypalSubscription({ id: subscriptionId, custom_id: user.subject_id }),
+        },
       });
       const res = await request(app)
         .post("/api/v2/entitlements/paypal/link")
@@ -193,7 +199,8 @@ describeIfSsl("webhooks", () => {
         .send({ subscription_id: subscriptionId });
       global.fetch = realFetch;
       resetTokenCache();
-      return res;
+      expect(res.status).toBe(200);
+      return { res, subjectId: user.subject_id };
     };
 
     it("rejects an event whose signature does not verify", async () => {
@@ -223,9 +230,23 @@ describeIfSsl("webhooks", () => {
 
     it("ends entitlement when a subscription is cancelled", async () => {
       const tokens = await register("wh-pp-cancel@example.com");
-      await linkPaypal(tokens, "I-WHCANCEL001");
+      const { subjectId } = await linkPaypal(
+        tokens,
+        "I-WHCANCEL001",
+        "wh-pp-cancel@example.com"
+      );
 
-      installFetchStub({ ...paypalAuthRoute, ...verifyRoute("SUCCESS") });
+      installFetchStub({
+        ...paypalAuthRoute,
+        ...verifyRoute("SUCCESS"),
+        "/v1/billing/subscriptions/": {
+          body: paypalSubscription({
+            id: "I-WHCANCEL001",
+            custom_id: subjectId,
+            status: "CANCELLED",
+          }),
+        },
+      });
 
       const res = await withSignature(request(app).post("/api/v2/webhooks/paypal")).send({
         id: "evt-cancel-1",
@@ -242,9 +263,23 @@ describeIfSsl("webhooks", () => {
 
     it("processes a duplicate event exactly once", async () => {
       const tokens = await register("wh-pp-dupe@example.com");
-      await linkPaypal(tokens, "I-WHDUPE0001");
+      const { subjectId } = await linkPaypal(
+        tokens,
+        "I-WHDUPE0001",
+        "wh-pp-dupe@example.com"
+      );
 
-      installFetchStub({ ...paypalAuthRoute, ...verifyRoute("SUCCESS") });
+      installFetchStub({
+        ...paypalAuthRoute,
+        ...verifyRoute("SUCCESS"),
+        "/v1/billing/subscriptions/": {
+          body: paypalSubscription({
+            id: "I-WHDUPE0001",
+            custom_id: subjectId,
+            status: "SUSPENDED",
+          }),
+        },
+      });
 
       const body = {
         id: "evt-dupe-1",

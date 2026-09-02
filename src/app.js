@@ -18,24 +18,34 @@ export const createApp = () => {
   app.set("trust proxy", 1);
   app.use(helmet());
 
-  // Left open deliberately. The clients are native applications that send no
-  // Origin header, so restricting this buys nothing on v1 while risking an
-  // unknown consumer. v2 sets an explicit allowlist.
-  app.use(cors({ origin: "*" }));
+  // v1 stays permissive: its clients are native applications that send no
+  // Origin at all, and an unknown consumer may exist. v2 gets the allowlist,
+  // mounted on its own router below.
+  app.use("/api/user", cors({ origin: "*" }));
+  app.use("/config", cors({ origin: "*" }));
 
-  // The raw body is kept for the PayPal webhook, whose signature is computed
-  // over the exact bytes sent rather than a re-serialization of them.
+  const captureRawBody = (req, _res, buf) => {
+    // The PayPal webhook signature is computed over the exact bytes sent, not
+    // over a re-serialization of the parsed object.
+    if (req.originalUrl && req.originalUrl.includes("/webhooks/")) {
+      req.rawBody = buf.toString("utf8");
+    }
+  };
+
+  // Limits are per-route and small by default. A 50MB ceiling on
+  // unauthenticated endpoints is free memory pressure for anyone who wants it.
   app.use(
-    bodyParser.json({
-      limit: "50mb",
-      verify: (req, _res, buf) => {
-        if (req.originalUrl && req.originalUrl.includes("/webhooks/")) {
-          req.rawBody = buf.toString("utf8");
-        }
-      },
-    })
+    "/api/v2/webhooks",
+    bodyParser.json({ limit: config.bodyLimits.webhook, verify: captureRawBody })
   );
-  app.use(bodyParser.urlencoded({ limit: "50mb", extended: true }));
+  app.use(
+    "/api/v2/entitlements",
+    bodyParser.json({ limit: config.bodyLimits.entitlement })
+  );
+  app.use(bodyParser.json({ limit: config.bodyLimits.default, verify: captureRawBody }));
+  app.use(
+    bodyParser.urlencoded({ limit: config.bodyLimits.default, extended: true })
+  );
 
   app.use((req, res, next) => {
     const startedAt = Date.now();
@@ -65,7 +75,21 @@ export const createApp = () => {
   app.use("/api/user", userRouter);
 
   if (config.v2Enabled) {
-    app.use("/api/v2", createV2Router());
+    // Explicit allowlist. A request with no Origin - every native client - is
+    // unaffected; a browser origin that is not listed gets no CORS headers
+    // back, so the browser refuses to hand it the response.
+    app.use(
+      "/api/v2",
+      cors({
+        origin: (origin, callback) => {
+          if (!origin) return callback(null, true);
+          const allowed = config.cors.allowedOrigins;
+          return callback(null, allowed.includes(origin) ? origin : false);
+        },
+        credentials: true,
+      }),
+      createV2Router()
+    );
   }
 
   app.use(ErrorHandler);

@@ -66,15 +66,74 @@ it was since refunded, revoked, or allowed to lapse.
 `APPLE_ROOT_CERTS` has no default. With no root configured, verification
 refuses to run rather than trusting an unpinned chain.
 
+**Environment is taken from the host that answered**, never from the
+`environment` field in the response body, and a Sandbox result is refused
+unless `APPLE_ALLOW_SANDBOX` is on. Sandbox and TestFlight purchases cost
+nothing, so accepting them in production makes the service free to anyone who
+can build the app. The check is applied on every read as well as at creation,
+so a row written while sandbox was permitted stops granting access the moment
+it is not.
+
+`APPLE_PRODUCT_IDS` restricts which products grant entitlement, and the
+transaction is selected by original transaction id rather than by taking the
+first one Apple returns.
+
 The client must be on **Unity IAP 5.x** to produce StoreKit 2 signed
 transactions; 4.11.0 emits legacy receipts this endpoint does not accept.
 
 ### PayPal
 
-Credentials live only in the environment. `paypal_subscriptions.subscription_id`
-is unique, so the first account to present a subscription owns it — subscription
-IDs are not secret and were previously enough on their own to unlock any
-desktop installation.
+Credentials live only in the environment.
+
+**A subscription id does not establish ownership.** It appears in receipts,
+customer emails and PayPal's own interface, so anyone who learns one could
+otherwise claim the entitlement. Ownership comes from `custom_id`, which the
+server sets when it creates the subscription (`POST
+/api/v2/entitlements/paypal/subscription`) and PayPal echoes back on lookup.
+`POST /api/v2/entitlements/paypal/link` refuses anything else.
+
+Subscriptions created before that existed are claimed through a separate
+verified path, enabled by `PAYPAL_LEGACY_CLAIM_ENABLED` and confirmed by a
+code sent to the address PayPal holds for the subscriber — not one the caller
+supplies. Turn it on for a supervised migration window, then off.
+
+Renewals are handled: `PAYMENT.SALE.COMPLETED` and the subscription lifecycle
+events all trigger an authoritative re-read from PayPal, so `next_billing_time`
+cannot go stale and strand a paying subscriber.
+
+### Deletion and billing
+
+Account deletion cancels a linked PayPal subscription and then **confirms with
+PayPal that it actually stopped** before destroying anything. An unconfirmed
+cancellation aborts the deletion with a 503 and records a durable job in
+`pending_cancellations`, retried by the maintenance loop. Completing the
+deletion while billing continued would detach the person from a subscription
+they can no longer sign in to stop.
+
+A PayPal 422 is not read as success: it covers several conditions, only one of
+which is "already inactive". What settles it is reading the subscription back.
+
+### Retention
+
+`purgeExpiredRecords` actually deletes, on a schedule started with the server —
+audit rows past `RETENTION_AUDIT_DAYS`, detached financial records past
+`RETENTION_FINANCIAL_DAYS`. Records still attached to a live account are never
+touched. The periods themselves still need legal sign-off.
+
+### Concurrency
+
+Ownership claiming, refresh-token rotation and password-reset consumption are
+all single-winner: the condition lives in the update filter rather than in a
+read that precedes it. `tests/v2/concurrency.test.js` fires genuinely parallel
+requests at each.
+
+Refresh rotation has a short grace window (`REFRESH_REUSE_GRACE_MS`) during
+which a second presentation of a just-rotated token is treated as a concurrent
+duplicate rather than a replay — a client with two screens open would otherwise
+be signed out. It does not weaken reuse detection: the loser gets no token
+either way, so the window only decides whether to destroy the session as well.
+Only a rotation sets `replaced_by`, so tokens revoked by logout, password reset
+or family revocation stay a hard failure.
 
 ### Coexistence with v1
 
@@ -82,6 +141,12 @@ Both versions share one `users` collection, so an account works on either. When
 v2 grants an entitlement it also writes a derived `users.subscription_date`, so
 a user who upgrades on one device is not locked out on another still running a
 released build.
+
+That value is derived by working backwards from the authoritative expiry
+(`expires_at` minus 30 days, capped at the present), because released clients
+compute `30 - (now - subscription_date).Days`. Writing the subscription's
+original start date would read as expired for anyone more than one billing
+period old — which is every renewing subscriber.
 
 With `V1_ENTITLEMENT_READONLY=true`, v1's `PATCH /update` stops accepting
 `subscription_date` for accounts that have a server-owned entitlement. It still

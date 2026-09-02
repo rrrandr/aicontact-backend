@@ -14,6 +14,9 @@ const paypalSubscriptionSchema = new mongoose.Schema({
   plan_id: String,
   status: String,
   next_billing_time: Date,
+  // True when ownership was proved through the migration path rather than
+  // by a binding the server created.
+  legacy_claim: { type: Boolean, default: false },
   linked_at: { type: Date, default: Date.now },
   updated_at: { type: Date, default: Date.now },
 });

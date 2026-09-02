@@ -2,6 +2,7 @@ import { createApp } from "./app";
 import { config, assertV2Config } from "./config/env";
 import { connectDB, disconnectDB } from "./util/db";
 import { logger } from "./util/logger";
+import { startMaintenance } from "./v2/services/maintenanceService";
 
 const start = async () => {
   // Fail fast. The previous implementation started listening regardless of
@@ -11,6 +12,10 @@ const start = async () => {
   if (config.v2Enabled) assertV2Config();
 
   await connectDB();
+
+  // Retention enforcement and cancellation recovery. Without this the
+  // retention periods would be configuration and nothing more.
+  const stopMaintenance = config.v2Enabled ? startMaintenance() : () => {};
 
   const app = createApp();
   const server = app.listen(config.port, () => {
@@ -22,6 +27,7 @@ const start = async () => {
 
   const shutdown = async (signal) => {
     logger.info("shutting down", { signal });
+    stopMaintenance();
     server.close(async () => {
       await disconnectDB();
       process.exit(0);

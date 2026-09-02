@@ -137,6 +137,16 @@ export const refresh = async (req, res, next) => {
     const result = await rotateRefreshToken(presented, context(req));
 
     if (!result.ok) {
+      if (result.reason === "concurrent") {
+        // Another request rotated this token a moment ago. The session is
+        // intact; the caller should use the token that rotation returned.
+        return res.status(409).json({
+          status: "Error",
+          code: "refresh_in_progress",
+          message: "This token was just refreshed. Use the most recent token.",
+        });
+      }
+
       return res.status(401).json({
         status: "Error",
         code: result.reason === "reused" ? "token_reused" : "invalid_refresh_token",
@@ -225,9 +235,19 @@ export const resetPassword = async (req, res, next) => {
     const token = requireString(req.body?.token, "token");
     const password = requirePassword(req.body?.password);
 
-    const record = await PasswordReset.findOne({ token_hash: sha256(token) });
+    // Consumed by an atomic conditional update, so simultaneous requests
+    // carrying the same token cannot both set a password.
+    const record = await PasswordReset.findOneAndUpdate(
+      {
+        token_hash: sha256(token),
+        used_at: { $exists: false },
+        expires_at: { $gt: new Date() },
+      },
+      { $set: { used_at: new Date() } },
+      { new: true }
+    );
 
-    if (!record || record.used_at || record.expires_at.getTime() <= Date.now()) {
+    if (!record) {
       return res.status(400).json({
         status: "Error",
         code: "invalid_reset_token",
@@ -249,9 +269,6 @@ export const resetPassword = async (req, res, next) => {
     // Invalidates every access token already issued for this account.
     user.token_version = (user.token_version ?? 0) + 1;
     await user.save();
-
-    record.used_at = new Date();
-    await record.save();
 
     await revokeAllForUser(user._id);
 

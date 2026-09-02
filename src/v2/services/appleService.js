@@ -169,10 +169,10 @@ const callApi = async (path, environment) => {
 /**
  * Reads authoritative subscription state.
  *
- * A transaction from a sandbox build is not present in production, so a
- * production miss falls back to sandbox rather than being treated as invalid.
- * The environment that answered is carried through onto the entitlement so
- * sandbox purchases stay distinguishable from real ones.
+ * A sandbox transaction is absent from production, so both hosts are tried.
+ * The environment recorded is the HOST THAT ANSWERED, never the environment
+ * field in the response body - a body claiming "Production" from the sandbox
+ * host would otherwise launder a free purchase into a real entitlement.
  */
 export const getSubscriptionState = async (originalTransactionId) => {
   const path = `/inApps/v1/subscriptions/${encodeURIComponent(originalTransactionId)}`;
@@ -183,19 +183,61 @@ export const getSubscriptionState = async (originalTransactionId) => {
 
   for (const environment of order) {
     const body = await callApi(path, environment);
-    if (body) return { ...body, environment: body.environment || environment };
+    if (body) return { ...body, environment };
   }
 
   return null;
 };
 
-/** Flattens the API response into the fields the entitlement model needs. */
-export const toEntitlementShape = (statusResponse) => {
-  const group = statusResponse?.data?.[0];
-  const last = group?.lastTransactions?.[0];
+/**
+ * Environment policy, applied wherever an entitlement could be created or
+ * evaluated. Fails closed: anything that is not Production requires explicit
+ * opt-in.
+ */
+export const environmentAllowed = (environment) =>
+  environment === "Production" || config.apple.allowSandbox;
+
+export const assertEnvironmentAllowed = (environment) => {
+  if (!environmentAllowed(environment)) {
+    throw new AppleVerificationError(
+      `Refusing a ${environment} entitlement in this environment`,
+      "apple_environment_rejected"
+    );
+  }
+};
+
+/** An allowlist, when configured, so any product under the bundle will not do. */
+export const assertProductAllowed = (productId) => {
+  const allowed = config.apple.productIds;
+  if (allowed.length && !allowed.includes(productId)) {
+    throw new AppleVerificationError(
+      `Product ${productId} is not one we sell`,
+      "apple_unknown_product"
+    );
+  }
+};
+
+/**
+ * Flattens the API response into the fields the entitlement model needs.
+ *
+ * Apple returns every subscription in the group, so the transaction is
+ * selected by original transaction id. Taking the first entry reads a
+ * different subscription's state onto this purchase.
+ */
+export const toEntitlementShape = (statusResponse, originalTransactionId) => {
+  const all = (statusResponse?.data || []).flatMap(
+    (group) => group?.lastTransactions || []
+  );
+
+  const last = originalTransactionId
+    ? all.find((entry) => entry.originalTransactionId === originalTransactionId)
+    : all[0];
 
   if (!last) {
-    throw new AppleVerificationError("No transaction found for this subscription");
+    throw new AppleVerificationError(
+      "No transaction matching this subscription was returned",
+      "apple_transaction_not_found"
+    );
   }
 
   const transaction = last.signedTransactionInfo
@@ -216,6 +258,7 @@ export const toEntitlementShape = (statusResponse) => {
     expiresAt: transaction.expiresDate ? new Date(transaction.expiresDate) : null,
     autoRenew: renewal.autoRenewStatus === 1,
     environment: statusResponse.environment || "Production",
+    appleStatus: last.status,
     revocationDate: transaction.revocationDate
       ? new Date(transaction.revocationDate)
       : null,

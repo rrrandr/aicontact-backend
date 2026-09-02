@@ -54,6 +54,25 @@ export const createV2Router = () => {
     entitlements.verifyApple
   );
   router.post(
+    "/entitlements/paypal/subscription",
+    requireAuth,
+    limiter(v2.entitlement),
+    idempotency,
+    entitlements.createPaypalSubscription
+  );
+  router.post(
+    "/entitlements/paypal/claim-legacy/start",
+    requireAuth,
+    limiter(v2.forgot),
+    entitlements.startLegacyPaypalClaim
+  );
+  router.post(
+    "/entitlements/paypal/claim-legacy/confirm",
+    requireAuth,
+    limiter(v2.reset),
+    entitlements.confirmLegacyPaypalClaim
+  );
+  router.post(
     "/entitlements/paypal/link",
     requireAuth,
     limiter(v2.entitlement),

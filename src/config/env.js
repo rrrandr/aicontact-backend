@@ -70,6 +70,10 @@ export const config = {
     },
     accessTtl: process.env.JWT_ACCESS_TTL || "15m",
     refreshTtlDays: num("REFRESH_TOKEN_TTL_DAYS", 60),
+    // How long after a rotation a second presentation of the same token is
+    // read as a concurrent duplicate rather than a replay. See
+    // rotateRefreshToken for why this does not weaken reuse detection.
+    reuseGraceMs: num("REFRESH_REUSE_GRACE_MS", 10000),
     bcryptCost: num("BCRYPT_COST", 12),
   },
 
@@ -79,6 +83,18 @@ export const config = {
     get privateKey() { return required("APPLE_PRIVATE_KEY").replace(/\\n/g, "\n"); },
     get bundleId() { return required("APPLE_BUNDLE_ID"); },
     environment: process.env.APPLE_ENVIRONMENT || "Production",
+    // Sandbox purchases cost nothing. Accepting them in production makes the
+    // service free to anyone who can build the app, so this is opt-in and
+    // read per request rather than fixed at boot.
+    get allowSandbox() {
+      return bool("APPLE_ALLOW_SANDBOX", false);
+    },
+    get productIds() {
+      return (process.env.APPLE_PRODUCT_IDS || "")
+        .split(",")
+        .map((v) => v.trim())
+        .filter(Boolean);
+    },
     get rootCerts() {
       const raw = process.env.APPLE_ROOT_CERTS || "";
       return raw.split(",").map((v) => v.trim()).filter(Boolean);
@@ -96,6 +112,14 @@ export const config = {
         .filter(Boolean);
     },
     get webhookId() { return required("PAYPAL_WEBHOOK_ID"); },
+
+    // Off by default. Only for a supervised migration of subscriptions that
+    // pre-date server-side binding; see README.
+    get legacyClaimEnabled() {
+      return bool("PAYPAL_LEGACY_CLAIM_ENABLED", false);
+    },
+    returnUrl: process.env.PAYPAL_RETURN_URL || "",
+    cancelUrl: process.env.PAYPAL_CANCEL_URL || "",
   },
 
   mail: {
@@ -125,12 +149,33 @@ export const config = {
     },
   },
 
+  cors: {
+    // v2 only. v1 stays permissive for the released native clients.
+    get allowedOrigins() {
+      return (process.env.CORS_ALLOWED_ORIGINS || "")
+        .split(",")
+        .map((v) => v.trim())
+        .filter(Boolean);
+    },
+  },
+
+  bodyLimits: {
+    default: process.env.BODY_LIMIT_DEFAULT || "100kb",
+    // Signed Apple transactions and provider notifications are legitimately
+    // larger than an ordinary request.
+    webhook: process.env.BODY_LIMIT_WEBHOOK || "1mb",
+    entitlement: process.env.BODY_LIMIT_ENTITLEMENT || "256kb",
+  },
+
+  // Read per call so the enforcement job picks up a change without a
+  // redeploy. These defaults are placeholders pending legal sign-off.
   retention: {
-    // Financial records are kept against a pseudonymous identifier after an
-    // account is deleted. These defaults are placeholders pending legal
-    // sign-off - see README.
-    financialRecordDays: num("RETENTION_FINANCIAL_DAYS", 2555),
-    auditLogDays: num("RETENTION_AUDIT_DAYS", 365),
+    get financialRecordDays() {
+      return num("RETENTION_FINANCIAL_DAYS", 2555);
+    },
+    get auditLogDays() {
+      return num("RETENTION_AUDIT_DAYS", 365);
+    },
   },
 
   throttle: {

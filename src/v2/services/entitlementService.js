@@ -3,6 +3,7 @@ import { AuditLog } from "../../models/auditLog";
 import { User } from "../../models/user";
 import { config } from "../../config/env";
 import { logger } from "../../util/logger";
+import { environmentAllowed } from "./appleService";
 
 /**
  * The single writer for entitlement state.
@@ -56,10 +57,33 @@ export const upsertEntitlement = async ({
   return entitlement;
 };
 
+const LEGACY_WINDOW_DAYS = 30;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Derives the value released v1 clients read.
+ *
+ * They compute `30 - (now - subscription_date).Days` and grant access while
+ * that is positive (InAppPurchaseScreenHandler.cs:165-177), so the field has
+ * to describe the CURRENT billing period. Writing the subscription's original
+ * start date would read as expired for anyone more than a month old - which
+ * is every renewing subscriber.
+ *
+ * Working backwards from the authoritative expiry makes v1's arithmetic land
+ * on the real number of days remaining. The value is capped at the present so
+ * a longer plan cannot produce a future date.
+ */
 const syncLegacyField = async (user, entitlement) => {
-  const legacyValue = isActive(entitlement)
-    ? formatLegacyDate(entitlement.starts_at || new Date())
-    : "";
+  let legacyValue = "";
+
+  if (isActive(entitlement)) {
+    const expiresAt = entitlement.expires_at
+      ? entitlement.expires_at.getTime()
+      : Date.now() + LEGACY_WINDOW_DAYS * DAY_MS;
+
+    const derived = Math.min(expiresAt - LEGACY_WINDOW_DAYS * DAY_MS, Date.now());
+    legacyValue = formatLegacyDate(new Date(derived));
+  }
 
   await User.updateOne(
     { _id: user._id },
@@ -81,6 +105,14 @@ const formatLegacyDate = (date) => {
 export const isActive = (entitlement) => {
   if (!entitlement) return false;
   if (!ACTIVE_STATUSES.includes(entitlement.status)) return false;
+
+  // Environment is re-checked on every read, not only at creation. A row
+  // written while sandbox was permitted must stop granting access the moment
+  // it is not - otherwise the policy is only as good as the day it changed.
+  if (entitlement.platform === "apple" && !environmentAllowed(entitlement.environment)) {
+    return false;
+  }
+
   if (!entitlement.expires_at) return true;
   return entitlement.expires_at.getTime() > Date.now();
 };
@@ -107,6 +139,7 @@ export const resolveEntitlement = async (user) => {
     status: best ? best.status : "none",
     expires_at: best && best.expires_at ? best.expires_at.toISOString() : null,
     auto_renew: best ? best.auto_renew : false,
+    environment: best ? best.environment : null,
     // Present so clients can render a countdown without computing expiry.
     days_remaining: best && best.expires_at
       ? Math.max(0, Math.ceil((best.expires_at.getTime() - Date.now()) / 86400000))

@@ -23,8 +23,11 @@ const appleTransaction = (overrides = {}) => ({
 });
 
 /** The App Store Server API subscription-status response shape. */
-const appleStatusResponse = (transaction, { status = 1, autoRenew = 1 } = {}) => ({
-  environment: "Production",
+const appleStatusResponse = (
+  transaction,
+  { status = 1, autoRenew = 1, environment = "Production" } = {}
+) => ({
+  environment,
   bundleId: "com.FaceStreamCorporation.AICONTACT",
   data: [
     {
@@ -39,6 +42,24 @@ const appleStatusResponse = (transaction, { status = 1, autoRenew = 1 } = {}) =>
       ],
     },
   ],
+});
+
+/**
+ * A response carrying several transactions across several groups, so the
+ * server has to select by originalTransactionId rather than taking the first.
+ */
+const appleMultiStatusResponse = (entries, { environment = "Production" } = {}) => ({
+  environment,
+  bundleId: "com.FaceStreamCorporation.AICONTACT",
+  data: entries.map((group, index) => ({
+    subscriptionGroupIdentifier: `group-${index + 1}`,
+    lastTransactions: group.map(({ transaction, status = 1, autoRenew = 1 }) => ({
+      originalTransactionId: transaction.originalTransactionId,
+      status,
+      signedTransactionInfo: signApple(transaction),
+      signedRenewalInfo: signApple({ autoRenewStatus: autoRenew }),
+    })),
+  })),
 });
 
 const paypalSubscription = (overrides = {}) => ({
@@ -88,6 +109,7 @@ module.exports = {
   signApple,
   appleTransaction,
   appleStatusResponse,
+  appleMultiStatusResponse,
   paypalSubscription,
   installFetchStub,
   paypalAuthRoute,

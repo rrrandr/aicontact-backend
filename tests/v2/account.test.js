@@ -128,14 +128,22 @@ describeIfSsl("account and coexistence", () => {
     });
 
     it("cancels a linked PayPal subscription", async () => {
+      let cancelCalled = false;
       const tokens = await register("del-paypal@example.com");
+      const user = await User.findOne({ email_norm: "del-paypal@example.com" });
 
       installFetchStub({
         ...paypalAuthRoute,
         "/v1/billing/subscriptions/": (url) =>
           String(url).endsWith("/cancel")
-            ? { status: 204, body: {} }
-            : { body: paypalSubscription({ id: "I-DELETEME001" }) },
+            ? ((cancelCalled = true), { status: 204, body: {} })
+            : {
+                body: paypalSubscription({
+                  id: "I-DELETEME001",
+                  custom_id: user.subject_id,
+                  status: cancelCalled ? "CANCELLED" : "ACTIVE",
+                }),
+              },
       });
 
       await request(app)

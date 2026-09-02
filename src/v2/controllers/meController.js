@@ -8,6 +8,7 @@ import { AuditLog } from "../../models/auditLog";
 import { hashIp } from "../../util/crypto";
 import { revokeAllForUser } from "../services/tokenService";
 import { cancelSubscription } from "../services/paypalService";
+import { PendingCancellation } from "../../models/pendingCancellation";
 import { publicUser } from "./authController";
 import { logger } from "../../util/logger";
 
@@ -88,19 +89,59 @@ export const deleteMe = async (req, res, next) => {
     const user = req.user;
     const subjectId = user.subject_id;
 
-    // Cancel any PayPal subscription we manage. An Apple subscription cannot
-    // be cancelled server-side - only the user can, in their device settings -
-    // which is why the response says so explicitly.
+    // Cancel any PayPal subscription we manage, and confirm it actually
+    // stopped, BEFORE anything is destroyed.
+    //
+    // Completing the deletion while billing continues is the worst available
+    // outcome: the person is detached from the subscription and can no longer
+    // sign in to stop it. So an unconfirmed cancellation aborts the deletion
+    // and leaves a durable job behind, rather than proceeding hopefully.
     const paypal = await PaypalSubscription.findOne({ user_id: user._id });
     let paypalCancelled = false;
+
     if (paypal) {
+      let result;
       try {
-        paypalCancelled = await cancelSubscription(paypal.subscription_id, "Account deleted");
+        result = await cancelSubscription(paypal.subscription_id, "Account deleted");
       } catch (error) {
-        logger.warn("paypal cancellation during deletion failed", {
-          error: error.message,
+        result = { cancelled: false, confirmed: false, detail: error.message };
+      }
+
+      if (!result.cancelled) {
+        await PendingCancellation.findOneAndUpdate(
+          { subscription_id: paypal.subscription_id },
+          {
+            $set: {
+              provider: "paypal",
+              subject_id: subjectId,
+              reason: "account deletion",
+              last_error: String(result.detail).slice(0, 500),
+              last_attempt_at: new Date(),
+            },
+            $inc: { attempts: 1 },
+            $setOnInsert: { created_at: new Date() },
+          },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+
+        logger.error("aborting deletion - paypal cancellation unconfirmed", {
+          subscription_id: paypal.subscription_id,
+          detail: result.detail,
+        });
+
+        return res.status(503).json({
+          status: "Error",
+          code: "cancellation_unconfirmed",
+          message:
+            "We could not confirm with PayPal that your subscription has stopped, so we have not deleted your account yet. Please try again shortly, or cancel the subscription in PayPal first.",
         });
       }
+
+      paypalCancelled = true;
+      await PendingCancellation.updateOne(
+        { subscription_id: paypal.subscription_id },
+        { $set: { resolved_at: new Date() } }
+      );
     }
 
     const hadAppleSubscription = await AppleTransaction.exists({ user_id: user._id });
