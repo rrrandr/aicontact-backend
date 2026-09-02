@@ -1,0 +1,13 @@
+import mongoose from "mongoose";
+
+// Single use, short lived, and stored only as a hash - the same treatment as
+// a refresh token, because it grants the same thing.
+const passwordResetSchema = new mongoose.Schema({
+  token_hash: { type: String, required: true, unique: true },
+  user_id: { type: mongoose.Schema.Types.ObjectId, ref: "user", index: true },
+  created_at: { type: Date, default: Date.now },
+  expires_at: { type: Date, required: true, index: { expires: 0 } },
+  used_at: Date,
+});
+
+export const PasswordReset = mongoose.model("password_reset", passwordResetSchema);

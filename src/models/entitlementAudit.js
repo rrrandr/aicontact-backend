@@ -7,6 +7,9 @@ const entitlementAuditSchema = new mongoose.Schema({
   email_norm: { type: String, index: true },
   previous_subscription_date: String,
   next_subscription_date: String,
+  // True when the write was ignored because the account has a server-owned
+  // entitlement (V1_ENTITLEMENT_READONLY).
+  ignored: { type: Boolean, default: false },
   ip: String,
   user_agent: String,
   at: { type: Date, default: Date.now, index: true },

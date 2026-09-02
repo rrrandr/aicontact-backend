@@ -2,9 +2,9 @@
 
 Express + MongoDB API behind the AICONTACT applications.
 
-Two API versions are planned. **v1** (`/api/user/*`) is what every released
-build talks to and cannot change shape. **v2** (`/api/v2/*`) is the
-authenticated replacement, not yet implemented.
+Two API versions run side by side. **v1** (`/api/user/*`) is what every
+released build talks to and cannot change shape. **v2** (`/api/v2/*`) is the
+authenticated replacement, mounted only when `ENABLE_V2` is true.
 
 ## Running
 
@@ -24,6 +24,75 @@ while every request failed.
 | --- | --- |
 | `GET /healthz` | Liveness. Always 200 if the process is up. |
 | `GET /readyz` | Readiness. 503 unless the database connection is live. |
+
+## v2
+
+Enable with `ENABLE_V2=true`. Every value v2 needs is checked at boot, so a
+missing Apple key is a startup failure rather than a failed purchase.
+
+| Endpoint | Notes |
+| --- | --- |
+| `POST /api/v2/auth/register` | Returns an access + refresh pair |
+| `POST /api/v2/auth/login` | Uniform failure; no account enumeration |
+| `POST /api/v2/auth/refresh` | Rotates; reuse revokes the whole family |
+| `POST /api/v2/auth/logout` | Revokes the presented refresh token |
+| `POST /api/v2/auth/password/forgot` | Always 202 |
+| `POST /api/v2/auth/password/reset` | Single use; ends every session |
+| `GET /api/v2/me` | Profile plus computed entitlement |
+| `PATCH /api/v2/me` | Terms acceptance only |
+| `DELETE /api/v2/me` | Account deletion; password required again |
+| `GET /api/v2/entitlements` | Authoritative state |
+| `POST /api/v2/entitlements/apple/verify` | Verifies with Apple |
+| `POST /api/v2/entitlements/paypal/link` | Binds a subscription to one account |
+| `POST /api/v2/webhooks/apple` | Server Notifications V2 |
+| `POST /api/v2/webhooks/paypal` | Subscription lifecycle |
+| `GET /config` | Unauthenticated, signed, cacheable |
+
+### Entitlements are server-owned
+
+No request handler writes entitlement state from client input. Rows in
+`entitlements` are created and updated only by provider verification and
+provider webhooks, and expiry is computed on the server. `PATCH /api/v2/me`
+rejects entitlement fields outright rather than ignoring them.
+
+### Apple
+
+Two independent checks, both required. The signed transaction's certificate
+chain is validated back to a **pinned** Apple root and its signature verified;
+then current state is read from the App Store Server API. A valid signature
+only proves a purchase happened at some point — it says nothing about whether
+it was since refunded, revoked, or allowed to lapse.
+
+`APPLE_ROOT_CERTS` has no default. With no root configured, verification
+refuses to run rather than trusting an unpinned chain.
+
+The client must be on **Unity IAP 5.x** to produce StoreKit 2 signed
+transactions; 4.11.0 emits legacy receipts this endpoint does not accept.
+
+### PayPal
+
+Credentials live only in the environment. `paypal_subscriptions.subscription_id`
+is unique, so the first account to present a subscription owns it — subscription
+IDs are not secret and were previously enough on their own to unlock any
+desktop installation.
+
+### Coexistence with v1
+
+Both versions share one `users` collection, so an account works on either. When
+v2 grants an entitlement it also writes a derived `users.subscription_date`, so
+a user who upgrades on one device is not locked out on another still running a
+released build.
+
+With `V1_ENTITLEMENT_READONLY=true`, v1's `PATCH /update` stops accepting
+`subscription_date` for accounts that have a server-owned entitlement. It still
+returns success, so released clients are unaffected, and the unauthenticated
+grant closes for that account. It closes for everyone only when v1 retires.
+
+### Retiring v1
+
+Not with an error status. Because released clients retry any non-2xx forever,
+v1's terminal state has to be a success-shaped response carrying an upgrade
+message.
 
 ## Tests
 
@@ -76,6 +145,18 @@ can grant that account a subscription with one request. It cannot be closed
 without breaking released clients, so for now every entitlement write is
 recorded to the `entitlement_audits` collection for review. It closes
 progressively in v2 and fully when v1 retires.
+
+## Outstanding decisions
+
+- **Retention periods** (`RETENTION_FINANCIAL_DAYS`, `RETENTION_AUDIT_DAYS`)
+  are placeholders. They need legal sign-off for your jurisdiction.
+- **No email provider is configured.** `MAIL_PROVIDER=log` only writes a log
+  line, so password reset does not actually send. Adapters for Resend and
+  Postmark are present; pick one and set `MAIL_PROVIDER_KEY`.
+- **Mongoose 6 is past end of life.** It is kept here because the production
+  server version is unknown; upgrading needs that answer first.
+- **The desktop builds have no account model.** Until they gain one, server-
+  owned entitlements cannot apply to Mac and Windows.
 
 ## Migration
 

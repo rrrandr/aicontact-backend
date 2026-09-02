@@ -6,11 +6,15 @@ import { logger } from "../util/logger";
 const ErrorHandler = (err, req, res, next) => {
   const errStatus = err.statusCode || 500;
 
-  logger.error("request failed", {
+  // Client errors are expected traffic; only server errors are worth an
+  // error-level line, so genuine failures are not buried under 400s.
+  const log = errStatus >= 500 ? logger.error : logger.warn;
+  log("request failed", {
     method: req.method,
     path: req.path,
     status: errStatus,
     error: err.message,
+    ...(errStatus >= 500 ? { stack: err.stack } : {}),
   });
 
   if (res.headersSent) return next(err);

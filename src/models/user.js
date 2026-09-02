@@ -34,13 +34,48 @@ const userSchema = new Schema({
     type: String,
     default: "false",
   },
+
+  // ---- v2 fields ----
+  // All of these are stripped from serialization below so that v1 response
+  // bodies stay byte-identical; v2 builds its own DTOs explicitly.
+
+  // Stable pseudonymous identifier. Survives account deletion so financial
+  // records can be retained without retaining the person.
+  subject_id: { type: String, index: true, sparse: true },
+
+  // Incremented to invalidate every issued access token at once - on password
+  // reset, on deletion, on demand.
+  token_version: { type: Number, default: 0 },
+
+  password_updated_at: Date,
+  terms_accepted_at: Date,
+
+  status: {
+    type: String,
+    enum: ["active", "deleted"],
+    default: "active",
+    index: true,
+  },
+  deleted_at: Date,
 });
+
+userSchema.index({ status: 1, email_norm: 1 });
 
 // Defence in depth. Controllers also project the password away, but this
 // guarantees no future code path can serialize a hash into a response.
+const INTERNAL_FIELDS = [
+  "password",
+  "email_norm",
+  "subject_id",
+  "token_version",
+  "password_updated_at",
+  "terms_accepted_at",
+  "status",
+  "deleted_at",
+];
+
 const stripInternalFields = (_doc, ret) => {
-  delete ret.password;
-  delete ret.email_norm;
+  for (const field of INTERNAL_FIELDS) delete ret[field];
   return ret;
 };
 
@@ -49,5 +84,5 @@ userSchema.set("toObject", { transform: stripInternalFields });
 
 export const User = mongoose.model("user", userSchema);
 
-// Every read goes through here so the projection can never be forgotten.
-export const PUBLIC_FIELDS = "-password -email_norm";
+// Every v1 read goes through here so the projection can never be forgotten.
+export const PUBLIC_FIELDS = INTERNAL_FIELDS.map((f) => `-${f}`).join(" ");

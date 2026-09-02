@@ -3,6 +3,7 @@ import { User, PUBLIC_FIELDS } from "../models/user";
 import { EntitlementAudit } from "../models/entitlementAudit";
 import { isValidEmail, normalizeEmail } from "../util/email";
 import { logger } from "../util/logger";
+import { legacyWritesLocked } from "../v2/services/entitlementService";
 
 /**
  * v1 controllers. Two released applications depend on these response bodies,
@@ -138,7 +139,15 @@ export const userUpdate = async (req, res, next) => {
     const wantsSubscription =
       saveData.subscription_date !== null &&
       saveData.subscription_date !== undefined;
-    if (wantsSubscription) {
+
+    // Once an account has a server-owned entitlement, subscription_date is
+    // derived and client writes to it are ignored. The response still reports
+    // success, so released clients are unaffected, but the unauthenticated
+    // entitlement grant closes for that account. It closes for everyone when
+    // v1 retires.
+    const locked = wantsSubscription && (await legacyWritesLocked(user._id));
+
+    if (wantsSubscription && !locked) {
       allowedUpdates.subscription_date = saveData.subscription_date;
     }
     if (saveData.terms_accepted !== null && saveData.terms_accepted !== undefined) {
@@ -147,7 +156,7 @@ export const userUpdate = async (req, res, next) => {
       );
     }
 
-    if (Object.keys(allowedUpdates).length === 0) {
+    if (Object.keys(allowedUpdates).length === 0 && !locked) {
       return res.status(400).json({
         code: 400,
         status: "Error",
@@ -161,6 +170,7 @@ export const userUpdate = async (req, res, next) => {
     if (wantsSubscription) {
       try {
         await EntitlementAudit.create({
+          ignored: locked,
           email_norm: normalizeEmail(saveData.email),
           previous_subscription_date: user.subscription_date,
           next_subscription_date: String(saveData.subscription_date),
@@ -174,7 +184,9 @@ export const userUpdate = async (req, res, next) => {
       }
     }
 
-    await User.updateOne({ _id: user._id }, { $set: allowedUpdates });
+    if (Object.keys(allowedUpdates).length) {
+      await User.updateOne({ _id: user._id }, { $set: allowedUpdates });
+    }
     const updated = await User.findById(user._id).select(PUBLIC_FIELDS);
 
     return res.status(200).json({

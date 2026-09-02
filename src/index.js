@@ -1,11 +1,15 @@
 import { createApp } from "./app";
-import { config } from "./config/env";
+import { config, assertV2Config } from "./config/env";
 import { connectDB, disconnectDB } from "./util/db";
 import { logger } from "./util/logger";
 
 const start = async () => {
   // Fail fast. The previous implementation started listening regardless of
   // whether the database was reachable and reported success either way.
+  // Validate v2 configuration before opening a socket, so a missing Apple key
+  // is a boot failure rather than a failed purchase.
+  if (config.v2Enabled) assertV2Config();
+
   await connectDB();
 
   const app = createApp();

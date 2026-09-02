@@ -5,6 +5,9 @@ import helmet from "helmet";
 import mongoose from "mongoose";
 import ErrorHandler from "./middlewears/errorHandler";
 import userRouter from "./routes/userRoutes";
+import configRouter from "./routes/configRoutes";
+import { createV2Router } from "./v2/routes";
+import { config } from "./config/env";
 import { logger } from "./util/logger";
 
 // Split out from index.js so tests can mount the app without binding a port
@@ -20,7 +23,18 @@ export const createApp = () => {
   // unknown consumer. v2 sets an explicit allowlist.
   app.use(cors({ origin: "*" }));
 
-  app.use(bodyParser.json({ limit: "50mb" }));
+  // The raw body is kept for the PayPal webhook, whose signature is computed
+  // over the exact bytes sent rather than a re-serialization of them.
+  app.use(
+    bodyParser.json({
+      limit: "50mb",
+      verify: (req, _res, buf) => {
+        if (req.originalUrl && req.originalUrl.includes("/webhooks/")) {
+          req.rawBody = buf.toString("utf8");
+        }
+      },
+    })
+  );
   app.use(bodyParser.urlencoded({ limit: "50mb", extended: true }));
 
   app.use((req, res, next) => {
@@ -47,7 +61,12 @@ export const createApp = () => {
       .json({ status: ready ? "ready" : "not-ready" });
   });
 
+  app.use(configRouter);
   app.use("/api/user", userRouter);
+
+  if (config.v2Enabled) {
+    app.use("/api/v2", createV2Router());
+  }
 
   app.use(ErrorHandler);
 
