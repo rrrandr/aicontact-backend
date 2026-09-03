@@ -190,18 +190,14 @@ export const refresh = async (req, res, next) => {
       });
     }
 
-    const user = await User.findById(result.userId);
-    if (!user || user.status !== "active") {
-      return res.status(401).json({
-        status: "Error",
-        code: "invalid_refresh_token",
-        message: "Refresh token is invalid or expired.",
-      });
-    }
-
+    // Signed from the snapshot rotation validated the family against. The
+    // account is deliberately NOT re-read here: doing so would rebase the
+    // session onto whatever generation exists by then, handing a token
+    // carrying the new token_version to a session whose family was revoked
+    // between rotation's last check and this point.
     return res.status(200).json({
       status: "Success",
-      access_token: issueAccessToken(user),
+      access_token: issueAccessToken(result.user),
       refresh_token: result.refreshToken,
       token_type: "Bearer",
       expires_in: config.auth.accessTtl,
@@ -248,6 +244,7 @@ export const forgotPassword = async (req, res, next) => {
     await PasswordReset.create({
       token_hash: sha256(token),
       user_id: user._id,
+      token_version_at_issue: user.token_version ?? 0,
       expires_at: new Date(Date.now() + RESET_TTL_MS),
     });
 
@@ -296,15 +293,24 @@ export const resetPassword = async (req, res, next) => {
       // lease went stale could otherwise still write a password here. This
       // condition is what makes only one write land: after the winner, the
       // marker equals this token, so no second update can match.
+      // Bound to the credential generation this link was issued under. Any
+      // successful reset increments token_version, so every sibling link
+      // becomes stale the moment one of them is used - in either order, and
+      // without inferring ordering from millisecond timestamps. The
+      // timestamp condition is kept as a secondary guard, and for records
+      // issued before this field existed.
+      const generationGuard =
+        record.token_version_at_issue === undefined ||
+        record.token_version_at_issue === null
+          ? {}
+          : { token_version: record.token_version_at_issue };
+
       updated = await User.findOneAndUpdate(
         {
           _id: record.user_id,
           status: "active",
           password_reset_token_hash: { $ne: tokenHash },
-          // Bound to when this link was requested. Any password change since
-          // then - by another outstanding link, or by this one already -
-          // makes it stale. Blocking only the exact token last used would
-          // leave every other outstanding link live.
+          ...generationGuard,
           $or: [
             { password_updated_at: { $exists: false } },
             { password_updated_at: null },

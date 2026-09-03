@@ -286,7 +286,9 @@ export const rotateRefreshToken = async (presented, context = {}) => {
   // Re-checked after the write. Either the revoker saw this row and revoked
   // it, or it revoked the family before this check and we revoke the row
   // ourselves - so the two orderings converge on the same outcome.
-  if (!(await familyIsUsable(claimed.family_id, claimed.user_id)).usable) {
+  const validated = await familyIsUsable(claimed.family_id, claimed.user_id);
+
+  if (!validated.usable) {
     await RefreshToken.updateOne(
       { token_hash: nextHash, revoked_at: { $exists: false } },
       { $set: { revoked_at: new Date() } }
@@ -297,5 +299,15 @@ export const rotateRefreshToken = async (presented, context = {}) => {
     return { ok: false, reason: "reused" };
   }
 
-  return { ok: true, userId: claimed.user_id, refreshToken: next };
+  // The caller signs the access token from THIS snapshot, not from a later
+  // read. Re-reading the account after rotation would let a session whose
+  // family was revoked a moment ago pick up the newer credential generation
+  // and authenticate under it - the refresh equivalent of the login race.
+  return {
+    ok: true,
+    userId: claimed.user_id,
+    refreshToken: next,
+    user: validated.user,
+    tokenVersion: validated.user.token_version ?? 0,
+  };
 };

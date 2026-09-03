@@ -218,11 +218,19 @@ Three consequences follow from the same rule:
 - **Logout revokes the family**, resolving the presented token even when a
   rotation has already consumed its row. Revoking only that row does nothing
   once it is spent, leaving the successor usable.
-- **A successful password reset ends every outstanding reset link.** The
-  conditional User update requires `password_updated_at` to be no newer than
-  the reset request itself, so any password change since the link was issued
-  makes it stale — in either direction, whichever link is used first.
-  Outstanding records are also marked used, as belt and braces.
+- **Refresh signs from the generation it validated.** The access token is
+  built from the account snapshot rotation checked the family against, never
+  from a later read. Re-reading would rebase the session onto whatever
+  generation exists by then, handing a valid post-reset token to a session
+  whose family had just been revoked. Account deletion has no equivalent
+  boundary — it mints no credential.
+- **A successful password reset ends every outstanding reset link.** Each link
+  records the credential generation it was issued under, and the conditional
+  User update requires the account to still be at that generation. Any
+  successful reset increments `token_version`, so every sibling link goes
+  stale — in either order, and without inferring ordering from millisecond
+  timestamps. A timestamp condition is kept as a secondary guard, and
+  outstanding records are marked used as belt and braces.
 - **The transparent bcrypt rehash at login is a conditional update**, applied
   only while the stored hash is still the one just verified. Saving the
   in-memory document instead would write the old password back over a
