@@ -200,6 +200,36 @@ they do not:
   cannot land a successor into a lineage nobody revoked. Password reset and
   account deletion both go through it.
 
+### Sessions belong to a credential generation
+
+One invariant ties the session lifecycle together: **a refresh-token family
+belongs to the `User.token_version` it was created under.**
+
+`token_families` records that version at creation, and rotation compares it
+against the account's current one, revoking the family when they differ. This
+is what catches a session that was never explicitly revoked but is stale
+anyway — a login that verifies the old password, stalls, and creates its
+family *after* a password reset has already enumerated and revoked everything.
+Its access token fails on `token_version`; without the family check its
+refresh token would still mint a valid one.
+
+Three consequences follow from the same rule:
+
+- **Logout revokes the family**, resolving the presented token even when a
+  rotation has already consumed its row. Revoking only that row does nothing
+  once it is spent, leaving the successor usable.
+- **A successful password reset ends every outstanding reset link.** The
+  conditional User update requires `password_updated_at` to be no newer than
+  the reset request itself, so any password change since the link was issued
+  makes it stale — in either direction, whichever link is used first.
+  Outstanding records are also marked used, as belt and braces.
+- **The transparent bcrypt rehash at login is a conditional update**, applied
+  only while the stored hash is still the one just verified. Saving the
+  in-memory document instead would write the old password back over a
+  concurrent reset. Tokens are still issued from the state the login actually
+  authenticated against, so a login that raced a reset records the superseded
+  generation and is refused on first use rather than inheriting the new one.
+
 ### Coexistence with v1
 
 Both versions share one `users` collection, so an account works on either. When

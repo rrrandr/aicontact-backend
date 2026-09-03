@@ -10,6 +10,7 @@ import {
   issueTokenPair,
   rotateRefreshToken,
   revokeAllForUser,
+  revokeFamilyForToken,
   issueAccessToken,
 } from "../services/tokenService";
 import { RefreshToken } from "../../models/refreshToken";
@@ -112,15 +113,46 @@ export const login = async (req, res, next) => {
 
     // Transparent rehash. Accounts created under v1 carry cost-10 hashes;
     // there is no reason to force a reset when the plaintext is in hand.
-    const cost = Number(user.password.split("$")[2]);
-    if (Number.isFinite(cost) && cost < config.auth.bcryptCost) {
-      user.password = await bcrypt.hash(password, config.auth.bcryptCost);
-      user.password_updated_at = new Date();
+    //
+    // Written with a conditional update rather than saving the document we
+    // are holding. A password reset landing between the read above and this
+    // write would otherwise be undone: saving the in-memory document writes
+    // the OLD password back, resurrecting a credential that was just
+    // replaced. The condition means the upgrade applies only while the stored
+    // hash is still the one we verified against.
+    const observedHash = user.password;
+    const observedCost = Number(observedHash.split("$")[2]);
+
+    if (Number.isFinite(observedCost) && observedCost < config.auth.bcryptCost) {
+      await User.updateOne(
+        { _id: user._id, password: observedHash },
+        {
+          $set: {
+            password: await bcrypt.hash(password, config.auth.bcryptCost),
+            password_updated_at: new Date(),
+          },
+        }
+      );
     }
 
     // Backfill for accounts that predate v2.
-    if (!user.subject_id) user.subject_id = newSubjectId();
-    await user.save();
+    if (!user.subject_id) {
+      const subjectId = newSubjectId();
+      await User.updateOne(
+        {
+          _id: user._id,
+          $or: [{ subject_id: { $exists: false } }, { subject_id: null }, { subject_id: "" }],
+        },
+        { $set: { subject_id: subjectId } }
+      );
+      user.subject_id = subjectId;
+    }
+
+    // Tokens are deliberately issued from the account state this login
+    // actually authenticated against. Re-reading here would let a login that
+    // verified a superseded password pick up the new credential generation
+    // and mint a valid session; instead its family records the old
+    // generation and is refused on first use.
 
     return res.status(200).json({
       status: "Success",
@@ -183,10 +215,10 @@ export const logout = async (req, res, next) => {
   try {
     const presented = req.body?.refresh_token;
     if (typeof presented === "string" && presented) {
-      await RefreshToken.updateOne(
-        { token_hash: sha256(presented), revoked_at: { $exists: false } },
-        { $set: { revoked_at: new Date() } }
-      );
+      // The whole family, not just this row. If a rotation has already
+      // consumed the presented token, revoking that row alone does nothing
+      // and its successor stays usable.
+      await revokeFamilyForToken(presented, "logout");
     }
     // Always succeeds. Whether the token existed is not the caller's business.
     return res.status(200).json({ status: "Success" });
@@ -269,6 +301,15 @@ export const resetPassword = async (req, res, next) => {
           _id: record.user_id,
           status: "active",
           password_reset_token_hash: { $ne: tokenHash },
+          // Bound to when this link was requested. Any password change since
+          // then - by another outstanding link, or by this one already -
+          // makes it stale. Blocking only the exact token last used would
+          // leave every other outstanding link live.
+          $or: [
+            { password_updated_at: { $exists: false } },
+            { password_updated_at: null },
+            { password_updated_at: { $lte: record.created_at } },
+          ],
         },
         {
           $set: {
@@ -302,6 +343,19 @@ export const resetPassword = async (req, res, next) => {
     // again, whatever else fails - the marker above enforces that even if
     // this settle does not land.
     await settleLease(PasswordReset, record._id, "used_at", record.lease_token);
+
+    // Belt and braces alongside the time condition above: no outstanding link
+    // for this account survives a successful reset.
+    try {
+      await PasswordReset.updateMany(
+        { user_id: updated._id, used_at: { $exists: false } },
+        { $set: { used_at: new Date() }, $unset: { processing_started_at: 1, lease_token: 1 } }
+      );
+    } catch (error) {
+      logger.error("failed to invalidate outstanding reset links", {
+        error: error.message,
+      });
+    }
 
     try {
       await revokeAllForUser(updated._id, "password-reset");

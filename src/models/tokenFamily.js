@@ -16,6 +16,10 @@ import mongoose from "mongoose";
 const tokenFamilySchema = new mongoose.Schema({
   family_id: { type: String, required: true, unique: true },
   user_id: { type: mongoose.Schema.Types.ObjectId, ref: "user", index: true },
+  // The account's credential generation when this family was created. A
+  // family that no longer matches User.token_version belongs to a superseded
+  // generation and must not be able to mint access tokens under the new one.
+  token_version: { type: Number, default: 0 },
   created_at: { type: Date, default: Date.now },
   revoked_at: Date,
   reason: String,

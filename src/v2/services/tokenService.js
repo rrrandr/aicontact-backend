@@ -2,6 +2,7 @@ import jwt from "jsonwebtoken";
 import { config } from "../../config/env";
 import { RefreshToken } from "../../models/refreshToken";
 import { TokenFamily } from "../../models/tokenFamily";
+import { User } from "../../models/user";
 import { randomToken, sha256, hashIp } from "../../util/crypto";
 import crypto from "crypto";
 import { logger } from "../../util/logger";
@@ -29,10 +30,17 @@ export const issueRefreshToken = async (user, context = {}, familyId = null) => 
   const token = randomToken(REFRESH_BYTES);
   const family = familyId || crypto.randomUUID();
 
-  // The family record is the durable place revocation lives.
+  // The family record is the durable place revocation lives, and it carries
+  // the credential generation it was created under.
   await TokenFamily.findOneAndUpdate(
     { family_id: family },
-    { $setOnInsert: { user_id: user._id, created_at: new Date() } },
+    {
+      $setOnInsert: {
+        user_id: user._id,
+        created_at: new Date(),
+        token_version: user.token_version ?? 0,
+      },
+    },
     { upsert: true, setDefaultsOnInsert: true }
   );
 
@@ -51,6 +59,35 @@ export const issueRefreshToken = async (user, context = {}, familyId = null) => 
 export const familyIsRevoked = async (familyId) => {
   const family = await TokenFamily.findOne({ family_id: familyId });
   return Boolean(family && family.revoked_at);
+};
+
+/**
+ * Whether a family may still mint sessions.
+ *
+ * Revocation is not enough on its own. A login that verifies the old password
+ * and then stalls can create its family *after* a password reset has
+ * enumerated and revoked everything, leaving a session that was never
+ * revoked but belongs to a superseded credential generation. Comparing the
+ * family's recorded token_version against the account's current one closes
+ * that: the stalled login recorded the generation it read, which the reset
+ * has since moved past.
+ */
+export const familyIsUsable = async (familyId, userId) => {
+  const [family, user] = await Promise.all([
+    TokenFamily.findOne({ family_id: familyId }),
+    User.findById(userId),
+  ]);
+
+  if (!user || user.status !== "active") return { usable: false, reason: "unknown" };
+  if (!family) return { usable: false, reason: "reused" };
+  if (family.revoked_at) return { usable: false, reason: "reused" };
+
+  if ((family.token_version ?? 0) !== (user.token_version ?? 0)) {
+    await revokeFamily(familyId, "credential-generation-superseded");
+    return { usable: false, reason: "reused" };
+  }
+
+  return { usable: true, user };
 };
 
 export const issueTokenPair = async (user, context = {}) => ({
@@ -78,6 +115,20 @@ export const revokeFamily = async (familyId, reason) => {
     reason,
     revoked: result.modifiedCount,
   });
+};
+
+/**
+ * Revokes the family a token belongs to, resolving the token even if a
+ * rotation has already consumed its row.
+ *
+ * Logout that only revokes the presented row does nothing once rotation has
+ * marked it revoked, leaving the successor usable.
+ */
+export const revokeFamilyForToken = async (presented, reason) => {
+  const stored = await RefreshToken.findOne({ token_hash: sha256(presented) });
+  if (!stored) return false;
+  await revokeFamily(stored.family_id, reason);
+  return true;
 };
 
 /**
@@ -163,9 +214,11 @@ export const rotateRefreshToken = async (presented, context = {}) => {
     { new: true }
   );
 
-  // A token whose family is dead is dead, whatever its own row says.
-  if (claimed && (await familyIsRevoked(claimed.family_id))) {
-    return { ok: false, reason: "reused" };
+  // A token whose family is dead - revoked, or left behind by a superseded
+  // credential generation - is dead, whatever its own row says.
+  if (claimed) {
+    const state = await familyIsUsable(claimed.family_id, claimed.user_id);
+    if (!state.usable) return { ok: false, reason: state.reason };
   }
 
   if (!claimed) {
@@ -192,8 +245,9 @@ export const rotateRefreshToken = async (presented, context = {}) => {
     return { ok: false, reason: "expired" };
   }
 
-  // A family revoked while this rotation was in flight must not be revived.
-  if (await familyIsRevoked(claimed.family_id)) {
+  // A family revoked - or superseded - while this rotation was in flight must
+  // not be revived.
+  if (!(await familyIsUsable(claimed.family_id, claimed.user_id)).usable) {
     logger.warn("rotation abandoned - family revoked mid-flight", {
       family_id: claimed.family_id,
     });
@@ -232,7 +286,7 @@ export const rotateRefreshToken = async (presented, context = {}) => {
   // Re-checked after the write. Either the revoker saw this row and revoked
   // it, or it revoked the family before this check and we revoke the row
   // ourselves - so the two orderings converge on the same outcome.
-  if (await familyIsRevoked(claimed.family_id)) {
+  if (!(await familyIsUsable(claimed.family_id, claimed.user_id)).usable) {
     await RefreshToken.updateOne(
       { token_hash: nextHash, revoked_at: { $exists: false } },
       { $set: { revoked_at: new Date() } }
