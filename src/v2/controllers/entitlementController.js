@@ -509,13 +509,13 @@ export const confirmLegacyPaypalClaim = async (req, res, next) => {
       const subscription = await getSubscription(subscriptionId);
 
       if (!subscription || !hasNoBinding(subscription)) {
-        await releaseLease(PaypalLegacyClaim, claim._id);
+        await releaseLease(PaypalLegacyClaim, claim._id, claim.lease_token);
         return invalid();
       }
 
       const shape = paypalShape(subscription);
       if (shape.status !== "active" && shape.status !== "grace") {
-        await releaseLease(PaypalLegacyClaim, claim._id);
+        await releaseLease(PaypalLegacyClaim, claim._id, claim.lease_token);
         return res.status(400).json({
           status: "Error",
           code: "subscription_not_active",
@@ -532,7 +532,7 @@ export const confirmLegacyPaypalClaim = async (req, res, next) => {
       });
 
       if (!claimed.ok) {
-        await releaseLease(PaypalLegacyClaim, claim._id);
+        await releaseLease(PaypalLegacyClaim, claim._id, claim.lease_token);
         return res.status(409).json({
           status: "Error",
           code: "subscription_already_linked",
@@ -553,7 +553,7 @@ export const confirmLegacyPaypalClaim = async (req, res, next) => {
 
       // The subscription is bound and the entitlement written, so the code is
       // now genuinely spent.
-      await settleLease(PaypalLegacyClaim, claim._id, "consumed_at");
+      await settleLease(PaypalLegacyClaim, claim._id, "consumed_at", claim.lease_token);
 
       await AuditLog.create({
         action: "paypal.legacy_claim_confirmed",
@@ -567,7 +567,7 @@ export const confirmLegacyPaypalClaim = async (req, res, next) => {
         entitlement: await resolveEntitlement(req.user),
       });
     } catch (error) {
-      await releaseLease(PaypalLegacyClaim, claim._id, error);
+      await releaseLease(PaypalLegacyClaim, claim._id, claim.lease_token, error);
       throw error;
     }
   } catch (error) {

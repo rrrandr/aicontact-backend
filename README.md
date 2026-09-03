@@ -157,14 +157,34 @@ spends the code whenever the work fails — leaving a user with an unchanged
 password and a dead reset link. The code is settled only once the work has
 succeeded, and the lease is released if anything goes wrong.
 
-### A note on transactions
+### Why there are no transactions
 
-None of the above uses a multi-document transaction. Those require a replica
-set, and the production MongoDB topology is still unknown (see the outstanding
-decisions below). Conditional single-document updates plus explicit
-compensation behave correctly on a standalone server as well, so that is what
-is implemented. If the deployment turns out to be a replica set, these flows
-are the ones worth revisiting.
+**The production deployment is a standalone mongod, so transactions are not
+available.** The connection strings in the developer handover are plain
+`mongodb://` with a single host, no `+srv`, and no `replicaSet` option —
+consistent with a self-hosted server on the same box the pipeline deploys to.
+
+Multi-document transactions require a replica set. Rather than emulate them
+with compensating writes and hope the timing holds, the flows that would have
+needed one are built so they do not:
+
+- **Fenced leases.** Every lease acquisition carries a random `lease_token`,
+  and settle and release both require it. A worker whose lease went stale
+  cannot mark its successor's work finished or clear an active lease.
+- **Durable family revocation.** `token_families` records revocation for a
+  whole refresh lineage. A rotation that stalls past the grace window and
+  lands its successor after the family was revoked cannot resurrect the
+  session: rotation checks family state before and after writing, so both
+  orderings converge on a revoked outcome.
+- **A single-document security transition.** Password reset writes the new
+  password and the hash of the token that produced it in the *same* document
+  update, so the irreversible change and the record of the code being spent
+  cannot diverge however the reset record ends up.
+
+If the backend later moves to Atlas or any replica set, refresh rotation,
+password reset and legacy claim completion are the three flows worth
+revisiting with real transactions — the fencing and family state would then be
+belt and braces rather than the primary mechanism.
 
 ### Coexistence with v1
 
@@ -249,8 +269,8 @@ progressively in v2 and fully when v1 retires.
 - **No email provider is configured.** `MAIL_PROVIDER=log` only writes a log
   line, so password reset does not actually send. Adapters for Resend and
   Postmark are present; pick one and set `MAIL_PROVIDER_KEY`.
-- **Mongoose 6 is past end of life.** It is kept here because the production
-  server version is unknown; upgrading needs that answer first.
+- **Mongoose 6 is past end of life.** The deployment is a standalone mongod;
+  the server *version* is still unknown, which is what an upgrade needs.
 - **The desktop builds have no account model.** Until they gain one, server-
   owned entitlements cannot apply to Mac and Windows.
 

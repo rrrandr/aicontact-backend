@@ -212,3 +212,54 @@ describe("a legacy PayPal claim code survives a transient failure", () => {
     ).toBeNull();
   });
 });
+
+describe("a reset code cannot change the password twice", () => {
+  it("is spent once the password has actually changed, even if later work fails", async () => {
+    // The password write is irreversible. If a failure after it releases the
+    // code, the same link can set the password again later - so consumption
+    // and the password change must not be able to diverge.
+    const email = "reset-divergence@example.com";
+    await register(email);
+    await request(app).post("/api/v2/auth/password/forgot").send({ email });
+
+    const user = await User.findOne({ email_norm: email });
+    await PasswordReset.updateOne(
+      { user_id: user._id },
+      { $set: { token_hash: sha256("divergence-token") } }
+    );
+
+    const { RefreshToken } = require("../../src/models/refreshToken");
+    jest
+      .spyOn(RefreshToken, "updateMany")
+      .mockRejectedValueOnce(new Error("transient failure after password write"));
+
+    const first = await request(app)
+      .post("/api/v2/auth/password/reset")
+      .send({ token: "divergence-token", password: "password-set-by-first" });
+
+    jest.restoreAllMocks();
+
+    // Whatever the response said, the password did change.
+    const signIn = await request(app)
+      .post("/api/v2/auth/login")
+      .send({ email, password: "password-set-by-first" });
+    expect(signIn.status).toBe(200);
+
+    // The same code must not be able to set it again.
+    const second = await request(app)
+      .post("/api/v2/auth/password/reset")
+      .send({ token: "divergence-token", password: "password-set-by-attacker" });
+    expect(second.status).toBe(400);
+
+    const attacker = await request(app)
+      .post("/api/v2/auth/login")
+      .send({ email, password: "password-set-by-attacker" });
+    expect(attacker.status).toBe(401);
+
+    const stillFirst = await request(app)
+      .post("/api/v2/auth/login")
+      .send({ email, password: "password-set-by-first" });
+    expect(stillFirst.status).toBe(200);
+    expect(first.status).toBeDefined();
+  });
+});

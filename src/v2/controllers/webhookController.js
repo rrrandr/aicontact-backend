@@ -16,6 +16,7 @@ import {
 } from "../services/paypalService";
 import { upsertEntitlement } from "../services/entitlementService";
 import { logger } from "../../util/logger";
+import { randomToken } from "../../util/crypto";
 
 /**
  * Webhook handling.
@@ -45,6 +46,7 @@ const LEASE_MS = 60 * 1000;
 const claimEvent = async (provider, eventId, eventType) => {
   const now = new Date();
   const staleBefore = new Date(now.getTime() - LEASE_MS);
+  const leaseToken = randomToken(16);
 
   try {
     await WebhookEvent.findOneAndUpdate(
@@ -59,34 +61,48 @@ const claimEvent = async (provider, eventId, eventType) => {
         ],
       },
       {
-        $set: { event_type: eventType, processing_started_at: now },
+        $set: { event_type: eventType, processing_started_at: now, lease_token: leaseToken },
         $inc: { attempts: 1 },
         $setOnInsert: { received_at: now },
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
-    return true;
+    return leaseToken;
   } catch (error) {
     // Duplicate key: the event is either finished or being processed now.
-    if (error.code === 11000) return false;
+    if (error.code === 11000) return null;
     throw error;
   }
 };
 
-const complete = (provider, eventId, outcome) =>
-  WebhookEvent.updateOne(
-    { provider, event_id: eventId },
-    { $set: { processed_at: new Date(), outcome }, $unset: { processing_started_at: 1 } }
+// Both of these are fenced on lease_token: a worker whose lease went stale
+// must not be able to mark its successor's work finished, or clear the lease
+// its successor is currently holding.
+const complete = async (provider, eventId, outcome, leaseToken) => {
+  const result = await WebhookEvent.updateOne(
+    { provider, event_id: eventId, lease_token: leaseToken },
+    {
+      $set: { processed_at: new Date(), outcome },
+      $unset: { processing_started_at: 1, lease_token: 1 },
+    }
   );
+  if ((result.modifiedCount ?? 0) === 0) {
+    logger.warn("stale webhook worker could not settle", { provider, event_id: eventId });
+  }
+};
 
-// Releases the lease so the provider's retry is processed rather than being
-// mistaken for a duplicate.
-const release = (provider, eventId, error) =>
-  WebhookEvent.updateOne(
-    { provider, event_id: eventId },
-    { $set: { last_error: String(error && error.message).slice(0, 500) },
-      $unset: { processing_started_at: 1 } }
+const release = async (provider, eventId, leaseToken, error) => {
+  const result = await WebhookEvent.updateOne(
+    { provider, event_id: eventId, lease_token: leaseToken },
+    {
+      $set: { last_error: String(error && error.message).slice(0, 500) },
+      $unset: { processing_started_at: 1, lease_token: 1 },
+    }
   );
+  if ((result.modifiedCount ?? 0) === 0) {
+    logger.warn("stale webhook worker could not release", { provider, event_id: eventId });
+  }
+};
 
 // Apple notification types mapped onto entitlement status.
 const APPLE_STATUS = {
@@ -127,7 +143,8 @@ export const appleWebhook = async (req, res, next) => {
       return res.status(400).json({ status: "Error", message: "Missing notificationUUID" });
     }
 
-    if (!(await claimEvent("apple", eventId, notification.notificationType))) {
+    const lease = await claimEvent("apple", eventId, notification.notificationType);
+    if (!lease) {
       logger.info("apple webhook duplicate ignored", { event_id: eventId });
       return res.status(200).json({ status: "Success", duplicate: true });
     }
@@ -144,7 +161,7 @@ export const appleWebhook = async (req, res, next) => {
 
     const originalTransactionId = transaction.originalTransactionId;
     if (!originalTransactionId) {
-      await complete("apple", eventId, "no-transaction");
+      await complete("apple", eventId, "no-transaction", lease);
       return res.status(200).json({ status: "Success", ignored: true });
     }
 
@@ -169,7 +186,7 @@ export const appleWebhook = async (req, res, next) => {
         },
         { upsert: true, setDefaultsOnInsert: true }
       );
-      await complete("apple", eventId, "unlinked-transaction");
+      await complete("apple", eventId, "unlinked-transaction", lease);
       return res.status(200).json({ status: "Success", unlinked: true });
     }
 
@@ -177,7 +194,7 @@ export const appleWebhook = async (req, res, next) => {
     const user = await User.findById(record.user_id);
 
     if (!user) {
-      await complete("apple", eventId, "user-missing");
+      await complete("apple", eventId, "user-missing", lease);
       return res.status(200).json({ status: "Success", ignored: true });
     }
 
@@ -188,7 +205,7 @@ export const appleWebhook = async (req, res, next) => {
         environment: data.environment,
         event_id: eventId,
       });
-      await complete("apple", eventId, "environment-rejected");
+      await complete("apple", eventId, "environment-rejected", lease);
       return res.status(200).json({ status: "Success", ignored: true });
     }
 
@@ -225,12 +242,12 @@ export const appleWebhook = async (req, res, next) => {
       }
     );
 
-      await complete("apple", eventId, notification.notificationType);
+      await complete("apple", eventId, notification.notificationType, lease);
       return res.status(200).json({ status: "Success" });
     } catch (error) {
       // Release the claim so Apple's retry is processed rather than being
       // dismissed as a duplicate, then let the error produce a 5xx.
-      await release("apple", eventId, error);
+      await release("apple", eventId, lease, error);
       throw error;
     }
   } catch (error) {
@@ -283,7 +300,8 @@ export const paypalWebhook = async (req, res, next) => {
       return res.status(400).json({ status: "Error", message: "Missing event id" });
     }
 
-    if (!(await claimEvent("paypal", eventId, event.event_type))) {
+    const lease = await claimEvent("paypal", eventId, event.event_type);
+    if (!lease) {
       logger.info("paypal webhook duplicate ignored", { event_id: eventId });
       return res.status(200).json({ status: "Success", duplicate: true });
     }
@@ -292,20 +310,20 @@ export const paypalWebhook = async (req, res, next) => {
       const subscriptionId = paypalSubscriptionId(event);
 
       if (!subscriptionId || !PAYPAL_HANDLED.has(event.event_type)) {
-        await complete("paypal", eventId, "ignored");
+        await complete("paypal", eventId, "ignored", lease);
         return res.status(200).json({ status: "Success", ignored: true });
       }
 
       const record = await PaypalSubscription.findOne({ subscription_id: subscriptionId });
 
       if (!record || !record.user_id) {
-        await complete("paypal", eventId, "unlinked-subscription");
+        await complete("paypal", eventId, "unlinked-subscription", lease);
         return res.status(200).json({ status: "Success", unlinked: true });
       }
 
       const user = await User.findById(record.user_id);
       if (!user) {
-        await complete("paypal", eventId, "user-missing");
+        await complete("paypal", eventId, "user-missing", lease);
         return res.status(200).json({ status: "Success", ignored: true });
       }
 
@@ -315,7 +333,7 @@ export const paypalWebhook = async (req, res, next) => {
       const subscription = await getSubscription(subscriptionId);
 
       if (!subscription) {
-        await complete("paypal", eventId, "subscription-missing");
+        await complete("paypal", eventId, "subscription-missing", lease);
         return res.status(200).json({ status: "Success", ignored: true });
       }
 
@@ -343,10 +361,10 @@ export const paypalWebhook = async (req, res, next) => {
         sourceRef: subscriptionId,
       });
 
-      await complete("paypal", eventId, event.event_type);
+      await complete("paypal", eventId, event.event_type, lease);
       return res.status(200).json({ status: "Success" });
     } catch (error) {
-      await release("paypal", eventId, error);
+      await release("paypal", eventId, lease, error);
       throw error;
     }
   } catch (error) {

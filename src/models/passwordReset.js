@@ -10,6 +10,8 @@ const passwordResetSchema = new mongoose.Schema({
   // Held while the code is being acted on, cleared if that work fails, so a
   // transient error does not spend the code.
   processing_started_at: Date,
+  // Identifies the current holder; every settle or release must present it.
+  lease_token: String,
   used_at: Date,
 });
 

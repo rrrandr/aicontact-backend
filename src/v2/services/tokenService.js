@@ -1,6 +1,7 @@
 import jwt from "jsonwebtoken";
 import { config } from "../../config/env";
 import { RefreshToken } from "../../models/refreshToken";
+import { TokenFamily } from "../../models/tokenFamily";
 import { randomToken, sha256, hashIp } from "../../util/crypto";
 import crypto from "crypto";
 import { logger } from "../../util/logger";
@@ -26,17 +27,30 @@ const refreshExpiry = () =>
 
 export const issueRefreshToken = async (user, context = {}, familyId = null) => {
   const token = randomToken(REFRESH_BYTES);
+  const family = familyId || crypto.randomUUID();
+
+  // The family record is the durable place revocation lives.
+  await TokenFamily.findOneAndUpdate(
+    { family_id: family },
+    { $setOnInsert: { user_id: user._id, created_at: new Date() } },
+    { upsert: true, setDefaultsOnInsert: true }
+  );
 
   await RefreshToken.create({
     token_hash: sha256(token),
     user_id: user._id,
-    family_id: familyId || crypto.randomUUID(),
+    family_id: family,
     expires_at: refreshExpiry(),
     user_agent: context.userAgent,
     ip_hash: hashIp(context.ip),
   });
 
   return token;
+};
+
+export const familyIsRevoked = async (familyId) => {
+  const family = await TokenFamily.findOne({ family_id: familyId });
+  return Boolean(family && family.revoked_at);
 };
 
 export const issueTokenPair = async (user, context = {}) => ({
@@ -47,6 +61,14 @@ export const issueTokenPair = async (user, context = {}) => ({
 });
 
 export const revokeFamily = async (familyId, reason) => {
+  // Family state first: a rotation still in flight checks this before it
+  // returns, so a successor landing afterwards cannot resurrect the session.
+  await TokenFamily.findOneAndUpdate(
+    { family_id: familyId },
+    { $set: { revoked_at: new Date(), reason } },
+    { upsert: true, setDefaultsOnInsert: true }
+  );
+
   const result = await RefreshToken.updateMany(
     { family_id: familyId, revoked_at: { $exists: false } },
     { $set: { revoked_at: new Date() } }
@@ -105,6 +127,11 @@ export const rotateRefreshToken = async (presented, context = {}) => {
     { new: true }
   );
 
+  // A token whose family is dead is dead, whatever its own row says.
+  if (claimed && (await familyIsRevoked(claimed.family_id))) {
+    return { ok: false, reason: "reused" };
+  }
+
   if (!claimed) {
     const existing = await RefreshToken.findOne({ token_hash: presentedHash });
 
@@ -127,6 +154,14 @@ export const rotateRefreshToken = async (presented, context = {}) => {
     }
 
     return { ok: false, reason: "expired" };
+  }
+
+  // A family revoked while this rotation was in flight must not be revived.
+  if (await familyIsRevoked(claimed.family_id)) {
+    logger.warn("rotation abandoned - family revoked mid-flight", {
+      family_id: claimed.family_id,
+    });
+    return { ok: false, reason: "reused" };
   }
 
   try {
@@ -156,6 +191,20 @@ export const rotateRefreshToken = async (presented, context = {}) => {
       error: error.message,
     });
     throw error;
+  }
+
+  // Re-checked after the write. Either the revoker saw this row and revoked
+  // it, or it revoked the family before this check and we revoke the row
+  // ourselves - so the two orderings converge on the same outcome.
+  if (await familyIsRevoked(claimed.family_id)) {
+    await RefreshToken.updateOne(
+      { token_hash: nextHash, revoked_at: { $exists: false } },
+      { $set: { revoked_at: new Date() } }
+    );
+    logger.warn("successor revoked - family was revoked during rotation", {
+      family_id: claimed.family_id,
+    });
+    return { ok: false, reason: "reused" };
   }
 
   return { ok: true, userId: claimed.user_id, refreshToken: next };

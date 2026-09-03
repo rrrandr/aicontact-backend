@@ -1,17 +1,23 @@
+import { randomToken } from "../../util/crypto";
 import { logger } from "../../util/logger";
 
 /**
- * Single-use codes that must survive a failure part-way through.
+ * Fenced leases over single-use records.
  *
  * Marking a code used and then doing the work loses the code whenever the
- * work fails: the password is unchanged but the reset link is spent, the
- * subscription is unclaimed but the confirmation code is gone. Instead a
- * processor takes a short lease, does the work, and only then marks the code
- * used - releasing the lease if anything goes wrong.
+ * work fails: the password is unchanged but the reset link is spent. So a
+ * processor takes a lease, does the work, and settles afterwards.
  *
- * Deliberately not a multi-document transaction: those need a replica set and
- * the production topology is unknown (see README). A conditional claim plus an
- * explicit release behaves correctly on a standalone server too.
+ * A lease recorded only as a timestamp cannot tell its holders apart. Once it
+ * goes stale and a second worker takes over, the first can still wake up and
+ * settle or release - marking someone else's work done, or clearing an active
+ * lease out from under them. Every acquisition therefore carries a random
+ * token, and every later write has to present it.
+ *
+ * Deliberately not a multi-document transaction: the production deployment is
+ * a standalone mongod (single-host mongodb:// with no replicaSet option), so
+ * transactions are unavailable. Fencing gives the same safety for this shape
+ * of work.
  */
 export const LEASE_MS = 60 * 1000;
 
@@ -21,32 +27,65 @@ const leaseIsFree = (staleBefore) => [
   { processing_started_at: { $lte: staleBefore } },
 ];
 
-/** Takes the lease, or returns null if the code is spent, expired or in use. */
+/**
+ * Takes the lease, or returns null if the record is spent, expired, or held
+ * by a live worker. The returned document carries the lease_token that later
+ * writes must present.
+ */
 export const claimWithLease = async (Model, filter, leaseMs = LEASE_MS) => {
   const now = new Date();
   const staleBefore = new Date(now.getTime() - leaseMs);
+  const leaseToken = randomToken(16);
 
   return Model.findOneAndUpdate(
     { ...filter, $or: leaseIsFree(staleBefore) },
-    { $set: { processing_started_at: now } },
+    { $set: { processing_started_at: now, lease_token: leaseToken } },
     { new: true }
   );
 };
 
-/** Marks the work done. The code is now spent. */
-export const settleLease = (Model, id, field) =>
-  Model.updateOne(
-    { _id: id },
-    { $set: { [field]: new Date() }, $unset: { processing_started_at: 1 } }
+/**
+ * Marks the work done. Only the current holder may do so, so a stale worker
+ * cannot declare its successor's work complete.
+ */
+export const settleLease = async (Model, id, field, leaseToken) => {
+  const result = await Model.updateOne(
+    { _id: id, lease_token: leaseToken },
+    { $set: { [field]: new Date() }, $unset: { processing_started_at: 1, lease_token: 1 } }
   );
 
-/** Gives the code back so the caller can try again. */
-export const releaseLease = async (Model, id, error) => {
-  await Model.updateOne({ _id: id }, { $unset: { processing_started_at: 1 } });
-  if (error) {
-    logger.warn("released single-use code after failure", {
+  const settled = (result.modifiedCount ?? 0) > 0;
+  if (!settled) {
+    logger.warn("stale worker tried to settle a lease it no longer holds", {
       model: Model.modelName,
-      error: error.message,
     });
   }
+  return settled;
+};
+
+/**
+ * Gives the record back so it can be retried. Only the current holder may do
+ * so, so a stale worker cannot clear an active lease.
+ */
+export const releaseLease = async (Model, id, leaseToken, error) => {
+  const result = await Model.updateOne(
+    { _id: id, lease_token: leaseToken },
+    { $unset: { processing_started_at: 1, lease_token: 1 } }
+  );
+
+  const released = (result.modifiedCount ?? 0) > 0;
+
+  if (error) {
+    logger.warn("released single-use record after failure", {
+      model: Model.modelName,
+      released,
+      error: error.message,
+    });
+  } else if (!released) {
+    logger.warn("stale worker tried to release a lease it no longer holds", {
+      model: Model.modelName,
+    });
+  }
+
+  return released;
 };

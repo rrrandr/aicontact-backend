@@ -10,6 +10,8 @@ const webhookEventSchema = new mongoose.Schema({
   // Set when a processor takes the event, cleared if processing fails, so a
   // provider retry can pick it up again.
   processing_started_at: Date,
+  // Identifies the current holder; every settle or release must present it.
+  lease_token: String,
   attempts: { type: Number, default: 0 },
   last_error: String,
   processed_at: Date,

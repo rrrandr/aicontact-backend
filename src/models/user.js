@@ -48,6 +48,11 @@ const userSchema = new Schema({
   token_version: { type: Number, default: 0 },
 
   password_updated_at: Date,
+  // Which reset token last changed this password. Written in the SAME
+  // document update as the password itself, so the irreversible change and
+  // the record of the code being spent cannot diverge - whatever happens to
+  // the reset record afterwards.
+  password_reset_token_hash: String,
   terms_accepted_at: Date,
 
   status: {
@@ -69,6 +74,7 @@ const INTERNAL_FIELDS = [
   "subject_id",
   "token_version",
   "password_updated_at",
+  "password_reset_token_hash",
   "terms_accepted_at",
   "status",
   "deleted_at",

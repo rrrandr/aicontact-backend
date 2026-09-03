@@ -188,3 +188,72 @@ describe("refresh rotation under a paused winner", () => {
     expect(after.replaced_by).toBe(sha256(rotated.body.refresh_token));
   });
 });
+
+describe("a revoked family cannot be resurrected", () => {
+  const originalGrace = process.env.REFRESH_REUSE_GRACE_MS;
+
+  afterEach(() => {
+    process.env.REFRESH_REUSE_GRACE_MS = originalGrace || "10000";
+    jest.restoreAllMocks();
+  });
+
+  it("does not leave a usable token behind when the successor lands after revocation", async () => {
+    // A stalls past the grace window; B presents the old token, which is now
+    // a genuine replay, so the family is revoked. A then finishes and inserts
+    // its successor - which must not resurrect the session.
+    process.env.REFRESH_REUSE_GRACE_MS = "40";
+
+    const tokens = await register("resurrect-1@example.com");
+    const user = await User.findOne({ email_norm: "resurrect-1@example.com" });
+
+    let reachedCreate;
+    const arrived = new Promise((resolve) => {
+      reachedCreate = resolve;
+    });
+    let release;
+    const held = new Promise((resolve) => {
+      release = resolve;
+    });
+
+    const realCreate = RefreshToken.create.bind(RefreshToken);
+    jest.spyOn(RefreshToken, "create").mockImplementation(async (...args) => {
+      reachedCreate();
+      await held;
+      return realCreate(...args);
+    });
+
+    const winner = request(app)
+      .post("/api/v2/auth/refresh")
+      .send({ refresh_token: tokens.refresh_token })
+      .then((res) => res);
+
+    await arrived;
+    // Let the grace window lapse so the next presentation is a real replay.
+    await new Promise((r) => setTimeout(r, 80));
+
+    const replay = await request(app)
+      .post("/api/v2/auth/refresh")
+      .send({ refresh_token: tokens.refresh_token });
+
+    release();
+    const winnerResult = await winner;
+
+    expect(replay.status).toBe(401);
+    expect(replay.body.code).toBe("token_reused");
+
+    // Whatever the winner ended up returning, no usable session may survive
+    // the revocation.
+    if (winnerResult.status === 200) {
+      const resurrected = await request(app)
+        .post("/api/v2/auth/refresh")
+        .send({ refresh_token: winnerResult.body.refresh_token });
+      expect(resurrected.status).toBe(401);
+    }
+
+    const usable = await RefreshToken.countDocuments({
+      user_id: user._id,
+      revoked_at: { $exists: false },
+    });
+    expect(usable).toBe(0);
+  });
+});

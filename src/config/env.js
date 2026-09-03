@@ -73,7 +73,9 @@ export const config = {
     // How long after a rotation a second presentation of the same token is
     // read as a concurrent duplicate rather than a replay. See
     // rotateRefreshToken for why this does not weaken reuse detection.
-    reuseGraceMs: num("REFRESH_REUSE_GRACE_MS", 10000),
+    get reuseGraceMs() {
+      return num("REFRESH_REUSE_GRACE_MS", 10000);
+    },
     bcryptCost: num("BCRYPT_COST", 12),
   },
 

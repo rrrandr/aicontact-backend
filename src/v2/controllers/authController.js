@@ -253,10 +253,25 @@ export const resetPassword = async (req, res, next) => {
       });
     }
 
+    const tokenHash = sha256(token);
+    let user;
+
     try {
-      const user = await User.findById(record.user_id);
+      user = await User.findById(record.user_id);
       if (!user || user.status !== "active") {
-        await releaseLease(PasswordReset, record._id);
+        await releaseLease(PasswordReset, record._id, record.lease_token);
+        return res.status(400).json({
+          status: "Error",
+          code: "invalid_reset_token",
+          message: "This reset link is invalid or has expired.",
+        });
+      }
+
+      // Authoritative check, independent of the reset record. If this token
+      // already changed this password, it is spent no matter what state the
+      // reset record ended up in.
+      if (user.password_reset_token_hash === tokenHash) {
+        await settleLease(PasswordReset, record._id, "used_at", record.lease_token);
         return res.status(400).json({
           status: "Error",
           code: "invalid_reset_token",
@@ -266,30 +281,42 @@ export const resetPassword = async (req, res, next) => {
 
       user.password = await bcrypt.hash(password, config.auth.bcryptCost);
       user.password_updated_at = new Date();
+      user.password_reset_token_hash = tokenHash;
       // Invalidates every access token already issued for this account.
       user.token_version = (user.token_version ?? 0) + 1;
+
+      // One document write carries both the new password and the record that
+      // this token produced it.
       await user.save();
+    } catch (error) {
+      // Nothing has changed yet, so the code goes back.
+      await releaseLease(PasswordReset, record._id, record.lease_token, error);
+      throw error;
+    }
 
+    // Past this point the password HAS changed. The code must never be
+    // released again, whatever else fails - the marker above enforces that
+    // even if this settle does not land.
+    await settleLease(PasswordReset, record._id, "used_at", record.lease_token);
+
+    try {
       await revokeAllForUser(user._id);
-
-      // The password has changed, so the code is now genuinely spent.
-      await settleLease(PasswordReset, record._id, "used_at");
-
       await AuditLog.create({
         action: "account.password_reset",
         user_id: user._id,
         subject_id: user.subject_id,
         ip_hash: hashIp(req.ip),
       });
-
-      return res.status(200).json({
-        status: "Success",
-        message: "Password updated. Please sign in again.",
-      });
     } catch (error) {
-      await releaseLease(PasswordReset, record._id, error);
-      throw error;
+      // Best effort. Access tokens still expire on their own, and
+      // token_version was already bumped in the write above.
+      logger.error("post-reset cleanup failed", { error: error.message });
     }
+
+    return res.status(200).json({
+      status: "Success",
+      message: "Password updated. Please sign in again.",
+    });
   } catch (error) {
     return next(error);
   }
