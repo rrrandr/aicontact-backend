@@ -191,6 +191,17 @@ describeSandbox("PayPal sandbox lifecycle", () => {
     (cancellationArmed() ? it : it.skip)(
       "confirms cancellation from PayPal during account deletion",
       async () => {
+        // Self-sufficient: this test links the subscription itself rather
+        // than depending on an earlier one, so it behaves identically when
+        // run alone. Without the link there would be no local record and
+        // deletion would quietly cancel nothing.
+        const linked = await authed(
+          request(app).post("/api/v2/entitlements/paypal/link"),
+          tokens
+        ).send({ subscription_id: approvedId });
+        expect(linked.status).toBe(200);
+        expect(linked.body.entitlement.active).toBe(true);
+
         // Re-verified from scratch, immediately before the destructive call.
         // Jest continues after a failure, so nothing above this line can be
         // treated as having established anything.
@@ -215,7 +226,26 @@ describeSandbox("PayPal sandbox lifecycle", () => {
 
         // Independently verified against PayPal, not just our own response.
         const after = await getSubscription(approvedId);
+        log(`  PayPal now reports: ${after.status}`);
         expect(["CANCELLED", "EXPIRED"]).toContain(after.status);
+
+        // The account must be gone as well as the billing.
+        const withToken = await request(app)
+          .get("/api/v2/me")
+          .set("Authorization", `Bearer ${tokens.access_token}`);
+        expect(withToken.status).toBe(401);
+
+        const withPassword = await request(app)
+          .post("/api/v2/auth/login")
+          .send({ email, password: PASSWORD });
+        expect(withPassword.status).toBe(401);
+
+        const withRefresh = await request(app)
+          .post("/api/v2/auth/refresh")
+          .send({ refresh_token: tokens.refresh_token });
+        expect(withRefresh.status).toBe(401);
+
+        log(`  account access after deletion: token 401, password 401, refresh 401`);
       }
     );
 
