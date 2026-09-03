@@ -6,3 +6,9 @@
 
 # test / build output
 /coverage
+
+# sandbox integration: credentials and run state, never committed
+.env.sandbox
+.paypal-sandbox-state.json
+# the template is tracked; it holds no values
+!.env.sandbox.example

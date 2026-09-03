@@ -314,6 +314,42 @@ without breaking released clients, so for now every entitlement write is
 recorded to the `entitlement_audits` collection for review. It closes
 progressively in v2 and fully when v1 retires.
 
+## PayPal sandbox integration
+
+Opt-in, and separate from the ordinary test run. `npm test` uses
+`jest.config.js`, whose `testMatch` covers `tests/` only, so nothing under
+`integration/` is ever picked up by it.
+
+```bash
+cp .env.sandbox.example .env.sandbox   # git-ignored; fill in the two secrets
+npm run paypal:preflight               # proves OAuth works, reports what exists
+npm run test:integration:paypal        # the lifecycle suite
+```
+
+The suite is closed by default and fails closed when opened:
+
+| State | Behaviour |
+| --- | --- |
+| `PAYPAL_SANDBOX_INTEGRATION` unset | Does not run at all |
+| Set, but variables missing | **Fails**, naming each missing variable |
+| `PAYPAL_ENV` is not `sandbox` | **Fails** — it will not run against Live |
+| `PAYPAL_WEBHOOK_ID` unset | Webhook tests **fail** unless `PAYPAL_SKIP_WEBHOOK_TESTS=1` |
+
+A green run therefore cannot mean "the credentials were missing so nothing
+happened".
+
+It runs in two phases because buyer approval is a browser step. Phase 1
+creates a subscription bound to the account and writes
+`.paypal-sandbox-state.json` (git-ignored) with the approval URL. After
+approving in the browser with a sandbox **personal** account, set
+`PAYPAL_TEST_SUBSCRIPTION_ID` and re-run for phase 2 — linking, ownership,
+idempotency, authoritative refresh, cancellation and deletion.
+
+Everything printed by these scripts goes through `src/util/redact.js`, which
+strips known secret values, `Authorization` headers, access tokens,
+credentialed database URIs, private keys, customer addresses, and shortens
+PayPal identifiers.
+
 ## Outstanding decisions
 
 - **Retention periods** (`RETENTION_FINANCIAL_DAYS`, `RETENTION_AUDIT_DAYS`)

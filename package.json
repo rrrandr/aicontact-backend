@@ -8,6 +8,8 @@
     "dev": "nodemon --exec babel-node src/index",
     "test": "jest --runInBand",
     "test:contract": "jest tests/contract --runInBand",
+    "paypal:preflight": "babel-node scripts/paypal-sandbox-preflight.js",
+    "test:integration:paypal": "jest --config jest.integration.config.js --runInBand",
     "backfill:email-norm": "babel-node scripts/backfill-email-norm.js"
   },
   "keywords": [],
