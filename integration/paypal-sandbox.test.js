@@ -3,7 +3,7 @@ import { createApp } from "../src/app";
 import { User } from "../src/models/user";
 import { PaypalSubscription } from "../src/models/paypalSubscription";
 import { Entitlement } from "../src/models/entitlement";
-import { getSubscription } from "../src/v2/services/paypalService";
+import { getSubscription, currentHost } from "../src/v2/services/paypalService";
 import { tail } from "../src/util/redact";
 import {
   readState,
@@ -11,6 +11,10 @@ import {
   resolveSubscriptionId,
   subscriptionSource,
 } from "../scripts/lib/sandboxState";
+import {
+  assertSafeToCancel,
+  cancellationArmed,
+} from "../scripts/lib/cancellationGuard";
 
 const { describeSandbox, log } = require("./guard");
 
@@ -183,18 +187,46 @@ describeSandbox("PayPal sandbox lifecycle", () => {
       }
     });
 
-    it("confirms cancellation from PayPal during account deletion", async () => {
-      const res = await authed(request(app).delete("/api/v2/me"), tokens).send({
-        password: PASSWORD,
-      });
+    // The only step that destroys anything. Off unless explicitly armed.
+    (cancellationArmed() ? it : it.skip)(
+      "confirms cancellation from PayPal during account deletion",
+      async () => {
+        // Re-verified from scratch, immediately before the destructive call.
+        // Jest continues after a failure, so nothing above this line can be
+        // treated as having established anything.
+        const before = await getSubscription(approvedId);
 
-      log(`  deletion responded ${res.status}`);
-      expect(res.status).toBe(200);
-      expect(res.body.paypal_subscription_cancelled).toBe(true);
+        assertSafeToCancel({
+          remote: before,
+          state: readState(),
+          env: process.env,
+          host: currentHost(),
+        });
 
-      // Independently verified against PayPal, not just our own response.
-      const remote = await getSubscription(approvedId);
-      expect(["CANCELLED", "EXPIRED"]).toContain(remote.status);
+        log(`  guard passed; cancelling ${tail(approvedId, 4)} (${before.status})`);
+
+        const res = await authed(request(app).delete("/api/v2/me"), tokens).send({
+          password: PASSWORD,
+        });
+
+        log(`  deletion responded ${res.status}`);
+        expect(res.status).toBe(200);
+        expect(res.body.paypal_subscription_cancelled).toBe(true);
+
+        // Independently verified against PayPal, not just our own response.
+        const after = await getSubscription(approvedId);
+        expect(["CANCELLED", "EXPIRED"]).toContain(after.status);
+      }
+    );
+
+    it("reports whether the destructive step is armed", () => {
+      if (!cancellationArmed()) {
+        log(
+          "  cancellation is NOT armed - the deletion step was skipped. " +
+            "Set PAYPAL_ALLOW_SANDBOX_CANCELLATION=true to enable it."
+        );
+      }
+      expect(typeof cancellationArmed()).toBe("boolean");
     });
   });
 });

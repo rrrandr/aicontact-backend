@@ -24,6 +24,13 @@ export class PaypalError extends Error {
 
 const host = () => HOSTS[config.paypal.env] || HOSTS.live;
 
+/**
+ * The host this service will actually talk to. Exposed so a caller about to
+ * do something destructive can verify it, rather than inferring it from
+ * configuration that might be read differently here.
+ */
+export const currentHost = () => host();
+
 let cachedToken = null;
 
 export const resetTokenCache = () => {
