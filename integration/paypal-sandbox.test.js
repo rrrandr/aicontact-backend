@@ -1,5 +1,3 @@
-import fs from "fs";
-import path from "path";
 import request from "supertest";
 import { createApp } from "../src/app";
 import { User } from "../src/models/user";
@@ -7,28 +5,29 @@ import { PaypalSubscription } from "../src/models/paypalSubscription";
 import { Entitlement } from "../src/models/entitlement";
 import { getSubscription } from "../src/v2/services/paypalService";
 import { tail } from "../src/util/redact";
+import {
+  readState,
+  writeState,
+  resolveSubscriptionId,
+  subscriptionSource,
+} from "../scripts/lib/sandboxState";
 
 const { describeSandbox, log } = require("./guard");
 
-const STATE_FILE = path.join(process.cwd(), ".paypal-sandbox-state.json");
 const PASSWORD = "a-sufficiently-long-password";
-
-const readState = () => {
-  try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-  } catch {
-    return {};
-  }
-};
-
-const writeState = (patch) => {
-  fs.writeFileSync(STATE_FILE, JSON.stringify({ ...readState(), ...patch }, null, 2));
-};
 
 describeSandbox("PayPal sandbox lifecycle", () => {
   const app = createApp();
-  const approvedId = process.env.PAYPAL_TEST_SUBSCRIPTION_ID;
   const planId = (process.env.PAYPAL_PLAN_IDS || "").split(",")[0].trim();
+
+  // Phase 1 records what it creates, so nothing has to be copied by hand.
+  // The environment variable is an override, and a disagreement is refused
+  // rather than resolved by precedence.
+  const startingState = readState();
+  const approvedId = resolveSubscriptionId({
+    envValue: process.env.PAYPAL_TEST_SUBSCRIPTION_ID,
+    state: startingState,
+  });
 
   const register = async (email, subjectId) => {
     const res = await request(app)
@@ -88,7 +87,7 @@ describeSandbox("PayPal sandbox lifecycle", () => {
       log(`  state written to:     .paypal-sandbox-state.json`);
       log(`\n  NEXT (manual): open the approve_url from that file in a browser,`);
       log(`  sign in with a sandbox PERSONAL buyer account, and approve.`);
-      log(`  Then set PAYPAL_TEST_SUBSCRIPTION_ID in .env.sandbox and re-run.\n`);
+      log(`  Then simply re-run - phase 2 picks the id up from the state file.\n`);
     });
   });
 
@@ -97,11 +96,12 @@ describeSandbox("PayPal sandbox lifecycle", () => {
    * ---------------------------------------------------------------- */
 
   (approvedId ? describe : describe.skip)("phase 2: approved subscription", () => {
-    const state = readState();
+    const state = startingState;
     let tokens;
     let email;
 
     beforeAll(async () => {
+      log(`  subscription id source: ${subscriptionSource({ envValue: process.env.PAYPAL_TEST_SUBSCRIPTION_ID, state })}`);
       if (!state.subject_id) {
         throw new Error(
           "No subject_id in .paypal-sandbox-state.json - run phase 1 first so the " +
@@ -116,6 +116,15 @@ describeSandbox("PayPal sandbox lifecycle", () => {
       const remote = await getSubscription(approvedId);
       expect(remote).toBeTruthy();
       log(`  PayPal reports status: ${remote.status}`);
+
+      if (remote.status === "APPROVAL_PENDING") {
+        throw new Error(
+          "This subscription has not been approved yet. Open approve_url from " +
+            ".paypal-sandbox-state.json, approve it with a sandbox personal buyer " +
+            "account, then re-run."
+        );
+      }
+
       expect(["ACTIVE", "APPROVED"]).toContain(remote.status);
     });
 
