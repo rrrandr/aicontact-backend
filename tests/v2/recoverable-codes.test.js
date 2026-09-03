@@ -39,8 +39,10 @@ describe("a password reset code survives a transient failure", () => {
     // user with neither a working password nor a usable reset link.
     const user = await startReset("recover-reset-1@example.com", "reset-token-1");
 
+    // The password write is a single conditional findOneAndUpdate on the User
+    // document, so that is where a transient failure lands.
     jest
-      .spyOn(User.prototype, "save")
+      .spyOn(User, "findOneAndUpdate")
       .mockRejectedValueOnce(new Error("transient write failure"));
 
     const failed = await request(app)

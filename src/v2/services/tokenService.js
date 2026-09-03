@@ -80,10 +80,46 @@ export const revokeFamily = async (familyId, reason) => {
   });
 };
 
-export const revokeAllForUser = async (userId) => {
+/**
+ * Ends every session for an account - what password reset and account
+ * deletion depend on.
+ *
+ * Families are revoked BEFORE token rows. Revoking only the rows that exist
+ * at this moment leaves a rotation already in flight free to insert its
+ * successor afterwards, into a lineage nobody ever marked dead. Rotation
+ * re-checks family state before it returns, so marking the family first is
+ * what makes that successor inert.
+ *
+ * Families are collected from the token rows as well as by user_id, so
+ * lineages that predate the token_families collection are covered too.
+ */
+export const revokeAllForUser = async (userId, reason = "revoke-all") => {
+  const now = new Date();
+  const familyIds = await RefreshToken.distinct("family_id", { user_id: userId });
+
+  if (familyIds.length) {
+    await TokenFamily.bulkWrite(
+      familyIds.map((familyId) => ({
+        updateOne: {
+          filter: { family_id: familyId },
+          update: {
+            $set: { revoked_at: now, reason },
+            $setOnInsert: { user_id: userId, created_at: now },
+          },
+          upsert: true,
+        },
+      }))
+    );
+  }
+
+  await TokenFamily.updateMany(
+    { user_id: userId, revoked_at: { $exists: false } },
+    { $set: { revoked_at: now, reason } }
+  );
+
   await RefreshToken.updateMany(
     { user_id: userId, revoked_at: { $exists: false } },
-    { $set: { revoked_at: new Date() } }
+    { $set: { revoked_at: now } }
   );
 };
 

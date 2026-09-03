@@ -159,14 +159,27 @@ succeeded, and the lease is released if anything goes wrong.
 
 ### Why there are no transactions
 
-**The production deployment is a standalone mongod, so transactions are not
-available.** The connection strings in the developer handover are plain
-`mongodb://` with a single host, no `+srv`, and no `replicaSet` option —
-consistent with a self-hosted server on the same box the pipeline deploys to.
+**The current configuration appears to be standalone, so transactions are
+assumed unavailable — but this has not been verified against the server.**
+The connection strings in the developer handover are plain `mongodb://` with a
+single host, no `+srv`, and no `replicaSet` option, which is consistent with a
+self-hosted server on the box the pipeline deploys to. That is evidence, not
+proof: a single-host URI can still address a replica-set member.
 
-Multi-document transactions require a replica set. Rather than emulate them
-with compensating writes and hope the timing holds, the flows that would have
-needed one are built so they do not:
+The definitive check is to ask the server. Against the deployment (credentials
+from the environment, never pasted anywhere):
+
+```bash
+mongosh "$URI" --quiet --eval 'const h = db.hello(); print(h.setName ? "replica set: " + h.setName : "standalone")'
+```
+
+If that reports a replica set, transactions are available and refresh
+rotation, password reset and legacy claim completion are the three flows worth
+revisiting with real ones — the fencing and family state below would then be
+belt and braces rather than the primary mechanism.
+
+Until then, the flows that would otherwise need a transaction are built so
+they do not:
 
 - **Fenced leases.** Every lease acquisition carries a random `lease_token`,
   and settle and release both require it. A worker whose lease went stale
@@ -176,15 +189,16 @@ needed one are built so they do not:
   lands its successor after the family was revoked cannot resurrect the
   session: rotation checks family state before and after writing, so both
   orderings converge on a revoked outcome.
-- **A single-document security transition.** Password reset writes the new
-  password and the hash of the token that produced it in the *same* document
-  update, so the irreversible change and the record of the code being spent
-  cannot diverge however the reset record ends up.
-
-If the backend later moves to Atlas or any replica set, refresh rotation,
-password reset and legacy claim completion are the three flows worth
-revisiting with real transactions — the fencing and family state would then be
-belt and braces rather than the primary mechanism.
+- **A self-guarding security transition.** The password write is a single
+  conditional update on the User document that matches only while
+  `password_reset_token_hash` is not this token, and sets the password, the
+  marker and `token_version` together. The reset record's lease coordinates
+  the workflow but is never the authority over a different document, so a
+  worker whose lease went stale still cannot write a password.
+- **Family-first revocation.** `revokeAllForUser` marks every family for the
+  account dead before touching token rows, so a rotation already in flight
+  cannot land a successor into a lineage nobody revoked. Password reset and
+  account deletion both go through it.
 
 ### Coexistence with v1
 
@@ -269,8 +283,13 @@ progressively in v2 and fully when v1 retires.
 - **No email provider is configured.** `MAIL_PROVIDER=log` only writes a log
   line, so password reset does not actually send. Adapters for Resend and
   Postmark are present; pick one and set `MAIL_PROVIDER_KEY`.
-- **Mongoose 6 is past end of life.** The deployment is a standalone mongod;
-  the server *version* is still unknown, which is what an upgrade needs.
+- **Mongoose 6 is past end of life.** Both the server version and the topology
+  still need confirming from the server itself — see the transactions note
+  above for the command.
+- **Credentials in the developer handover.** The files delivered by the
+  previous developer contain the production database credentials in plaintext.
+  They should be rotated, the files removed or securely archived, and the
+  replacements kept only in the deployment secret store.
 - **The desktop builds have no account model.** Until they gain one, server-
   owned entitlements cannot apply to Mac and Windows.
 

@@ -254,62 +254,66 @@ export const resetPassword = async (req, res, next) => {
     }
 
     const tokenHash = sha256(token);
-    let user;
+    let updated;
 
     try {
-      user = await User.findById(record.user_id);
-      if (!user || user.status !== "active") {
-        await releaseLease(PasswordReset, record._id, record.lease_token);
-        return res.status(400).json({
-          status: "Error",
-          code: "invalid_reset_token",
-          message: "This reset link is invalid or has expired.",
-        });
-      }
+      const hashed = await bcrypt.hash(password, config.auth.bcryptCost);
 
-      // Authoritative check, independent of the reset record. If this token
-      // already changed this password, it is spent no matter what state the
-      // reset record ended up in.
-      if (user.password_reset_token_hash === tokenHash) {
-        await settleLease(PasswordReset, record._id, "used_at", record.lease_token);
-        return res.status(400).json({
-          status: "Error",
-          code: "invalid_reset_token",
-          message: "This reset link is invalid or has expired.",
-        });
-      }
-
-      user.password = await bcrypt.hash(password, config.auth.bcryptCost);
-      user.password_updated_at = new Date();
-      user.password_reset_token_hash = tokenHash;
-      // Invalidates every access token already issued for this account.
-      user.token_version = (user.token_version ?? 0) + 1;
-
-      // One document write carries both the new password and the record that
-      // this token produced it.
-      await user.save();
+      // The User document guards itself. The reset record's lease coordinates
+      // the workflow, but it protects a DIFFERENT document - a worker whose
+      // lease went stale could otherwise still write a password here. This
+      // condition is what makes only one write land: after the winner, the
+      // marker equals this token, so no second update can match.
+      updated = await User.findOneAndUpdate(
+        {
+          _id: record.user_id,
+          status: "active",
+          password_reset_token_hash: { $ne: tokenHash },
+        },
+        {
+          $set: {
+            password: hashed,
+            password_updated_at: new Date(),
+            password_reset_token_hash: tokenHash,
+          },
+          // Invalidates every access token already issued for this account.
+          $inc: { token_version: 1 },
+        },
+        { new: true }
+      );
     } catch (error) {
-      // Nothing has changed yet, so the code goes back.
+      // Nothing changed, so the code goes back.
       await releaseLease(PasswordReset, record._id, record.lease_token, error);
       throw error;
     }
 
-    // Past this point the password HAS changed. The code must never be
-    // released again, whatever else fails - the marker above enforces that
-    // even if this settle does not land.
+    if (!updated) {
+      // Either this token already set the password, or the account is gone.
+      // Both mean the code is spent.
+      await settleLease(PasswordReset, record._id, "used_at", record.lease_token);
+      return res.status(400).json({
+        status: "Error",
+        code: "invalid_reset_token",
+        message: "This reset link is invalid or has expired.",
+      });
+    }
+
+    // Past this point the password HAS changed. The code is never released
+    // again, whatever else fails - the marker above enforces that even if
+    // this settle does not land.
     await settleLease(PasswordReset, record._id, "used_at", record.lease_token);
 
     try {
-      await revokeAllForUser(user._id);
+      await revokeAllForUser(updated._id, "password-reset");
       await AuditLog.create({
         action: "account.password_reset",
-        user_id: user._id,
-        subject_id: user.subject_id,
+        user_id: updated._id,
+        subject_id: updated.subject_id,
         ip_hash: hashIp(req.ip),
       });
     } catch (error) {
-      // Best effort. Access tokens still expire on their own, and
-      // token_version was already bumped in the write above.
+      // Best effort. token_version was already bumped in the write above, so
+      // existing access tokens are dead regardless.
       logger.error("post-reset cleanup failed", { error: error.message });
     }
 
