@@ -1,4 +1,5 @@
 const { redact } = require("../src/util/redact");
+const { assertSafeRedirects } = require("../scripts/lib/redirectUrls");
 
 /**
  * Opt-in, and closed by default.
@@ -34,6 +35,11 @@ const assertConfigured = () => {
       `Sandbox integration is enabled but these are missing from .env.sandbox: ${absent.join(", ")}`
     );
   }
+
+  // PayPal appends approval parameters to the return URL, so where it points
+  // is part of the configuration that has to be right before anything is
+  // created.
+  assertSafeRedirects();
 };
 
 /** describe() that skips wholesale when opt-in is off, and fails when on but unusable. */
