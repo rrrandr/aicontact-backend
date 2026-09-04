@@ -58,6 +58,10 @@ export const config = {
   // v2 configuration. Required values are only demanded when v2 is enabled,
   // so a v1-only deployment is unaffected by their absence.
   v2Enabled: bool("ENABLE_V2", false),
+  // Apple is opt-in. A PayPal-only deployment should not have to hold Apple
+  // credentials it will never use, and demanding placeholder values would make
+  // a misconfiguration look like a working install.
+  appleEnabled: bool("ENABLE_APPLE", false),
   // A getter so the rollout flag can be flipped without a code change and is
   // read at the moment of use.
   get v1EntitlementReadonly() {
@@ -221,14 +225,21 @@ function secret(name) {
 export const assertV2Config = () => {
   const checks = [
     () => config.auth.accessSecret,
-    () => config.apple.issuerId,
-    () => config.apple.keyId,
-    () => config.apple.privateKey,
-    () => config.apple.bundleId,
     () => config.paypal.clientId,
     () => config.paypal.clientSecret,
     () => config.paypal.webhookId,
   ];
+
+  // Only demand Apple credentials when Apple is actually turned on.
+  if (config.appleEnabled) {
+    checks.push(
+      () => config.apple.issuerId,
+      () => config.apple.keyId,
+      () => config.apple.privateKey,
+      () => config.apple.bundleId
+    );
+  }
+
   for (const check of checks) check();
 
   if (!config.paypal.planIds.length) {
@@ -237,7 +248,9 @@ export const assertV2Config = () => {
     );
   }
 
-  if (!config.apple.productIds.length) {
+  // Unchanged reasoning, now scoped to the provider it protects: an empty
+  // product list would grant entitlement to any purchase under the bundle.
+  if (config.appleEnabled && !config.apple.productIds.length) {
     throw new Error(
       "APPLE_PRODUCT_IDS must list at least one product; without it any in-app purchase under the bundle would grant entitlement."
     );

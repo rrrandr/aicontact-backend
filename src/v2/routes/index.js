@@ -7,6 +7,7 @@ import * as auth from "../controllers/authController";
 import * as me from "../controllers/meController";
 import * as entitlements from "../controllers/entitlementController";
 import * as webhooks from "../controllers/webhookController";
+import * as billingReturn from "../controllers/billingReturnController";
 
 // v2 clients do not have v1's unbounded retry behaviour, so rejection-based
 // limiting is safe throughout.
@@ -46,13 +47,18 @@ export const createV2Router = () => {
   router.delete("/me", requireAuth, limiter(v2.remove), me.deleteMe);
 
   router.get("/entitlements", requireAuth, entitlements.getEntitlement);
-  router.post(
-    "/entitlements/apple/verify",
-    requireAuth,
-    limiter(v2.entitlement),
-    idempotency,
-    entitlements.verifyApple
-  );
+  // Apple routes exist only when Apple is enabled. Mounting a verification
+  // endpoint that cannot be configured would answer requests it can never
+  // honour; absent is clearer than broken.
+  if (config.appleEnabled) {
+    router.post(
+      "/entitlements/apple/verify",
+      requireAuth,
+      limiter(v2.entitlement),
+      idempotency,
+      entitlements.verifyApple
+    );
+  }
   router.post(
     "/entitlements/paypal/subscription",
     requireAuth,
@@ -80,9 +86,17 @@ export const createV2Router = () => {
     entitlements.linkPaypal
   );
 
+  // Browser landing pages for the PayPal approval round trip. Public by
+  // necessity: the browser returning from PayPal carries no app session.
+  // They render a message and nothing else - no state is read or written.
+  router.get("/billing/return", billingReturn.billingReturn);
+  router.get("/billing/cancel", billingReturn.billingCancel);
+
   // Provider-authenticated, not user-authenticated. Both verify their own
   // signatures inside the handler.
-  router.post("/webhooks/apple", webhooks.appleWebhook);
+  if (config.appleEnabled) {
+    router.post("/webhooks/apple", webhooks.appleWebhook);
+  }
   router.post("/webhooks/paypal", webhooks.paypalWebhook);
 
   return router;

@@ -32,7 +32,7 @@ const HOST = "https://api-m.sandbox.paypal.com";
 const STATE_FILE = path.join(process.cwd(), ".paypal-sandbox-state.json");
 const ENV_FILE = path.join(process.cwd(), ".env.sandbox");
 
-const PRICE = "4.99";
+const PRICE = "6.00";   // mirrors the live AICONTACT plan
 const CURRENCY = "USD";
 
 const dryRun = process.argv.includes("--dry-run");
@@ -102,7 +102,7 @@ const run = async () => {
 
   safeLog(`=== AICONTACT sandbox catalogue ===`);
   safeLog(`  host:  ${HOST}`);
-  safeLog(`  price: ${PRICE} ${CURRENCY} monthly, renewing until cancelled`);
+  safeLog(`  trial: 13 days at 0.00 ${CURRENCY}, then ${PRICE} ${CURRENCY} monthly until cancelled`);
   safeLog(`  mode:  ${dryRun ? "DRY RUN - nothing will be created" : "CREATE"}\n`);
 
   const accessToken = await token();

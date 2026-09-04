@@ -4,6 +4,9 @@ process.env.LOG_LEVEL = process.env.LOG_LEVEL || "error";
 process.env.URI = process.env.URI || "mongodb://placeholder";
 
 process.env.ENABLE_V2 = "true";
+// Apple stays on for the suite so every existing Apple test keeps exercising
+// the same validation and routes. tests/v2/apple-flag.test.js overrides it.
+process.env.ENABLE_APPLE = "true";
 process.env.JWT_ACCESS_SECRET =
   "test-access-secret-that-is-long-enough-to-pass-validation";
 process.env.JWT_ACCESS_TTL = "15m";

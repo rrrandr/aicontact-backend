@@ -49,9 +49,11 @@ describe("payloads", () => {
     expect(plan.product_id).toBe("PROD-123");
     expect(plan.name).toBe(PLAN_NAME);
     expect(plan.status).toBe("ACTIVE");
-    expect(plan.billing_cycles).toHaveLength(1);
+    // Trial first, then the paid cycle. Selected by tenure rather than index so
+    // this test keeps checking the monthly terms wherever it sits.
+    expect(plan.billing_cycles).toHaveLength(2);
 
-    const cycle = plan.billing_cycles[0];
+    const cycle = plan.billing_cycles.find((c) => c.tenure_type === "REGULAR");
     expect(cycle.frequency).toEqual({ interval_unit: "MONTH", interval_count: 1 });
     expect(cycle.tenure_type).toBe("REGULAR");
     // 0 means until cancelled - a finite count would silently end subscriptions.
@@ -64,7 +66,8 @@ describe("payloads", () => {
 
   it("matches the price shown in the released Unity client", () => {
     const plan = planPayload("PROD-123", { price: "4.99", currency: "USD" });
-    expect(plan.billing_cycles[0].pricing_scheme.fixed_price.value).toBe("4.99");
+    const regular = plan.billing_cycles.find((c) => c.tenure_type === "REGULAR");
+    expect(regular.pricing_scheme.fixed_price.value).toBe("4.99");
   });
 
   it("rejects a malformed price or currency rather than sending it", () => {
@@ -80,8 +83,11 @@ describe("payloads", () => {
     // which PayPal would read as a different price. 4.99 survives, so the
     // guard has to be on the rendered string rather than the type.
     expect(() => planPayload("PROD-123", { price: 4.9, currency: "USD" })).toThrow(/price/);
-    expect(planPayload("PROD-123", { price: 4.99, currency: "USD" })
-      .billing_cycles[0].pricing_scheme.fixed_price.value).toBe("4.99");
+    expect(
+      planPayload("PROD-123", { price: 4.99, currency: "USD" })
+        .billing_cycles.find((c) => c.tenure_type === "REGULAR")
+        .pricing_scheme.fixed_price.value
+    ).toBe("4.99");
   });
 });
 

@@ -9,7 +9,13 @@ export const PLAN_NAME = "AICONTACT Monthly";
 // Stable request ids give PayPal its own idempotency: replaying a create with
 // the same id returns the original resource instead of a second one.
 export const PRODUCT_REQUEST_ID = "aicontact-sandbox-product-v1";
-export const PLAN_REQUEST_ID = "aicontact-sandbox-plan-monthly-v1";
+// Bumped because the payload now carries the trial cycle: reusing the old id
+// would return PayPal's original trial-less plan instead of creating this one.
+export const PLAN_REQUEST_ID = "aicontact-sandbox-plan-trial-monthly-v1";
+
+// Mirrors the live AICONTACT plan: one free 13-day cycle, then monthly forever.
+export const TRIAL_INTERVAL_UNIT = "DAY";
+export const TRIAL_INTERVAL_COUNT = 13;
 
 export class UnsafeEnvironment extends Error {}
 
@@ -49,13 +55,29 @@ export const planPayload = (productId, { price, currency }) => {
   return {
     product_id: productId,
     name: PLAN_NAME,
-    description: "AICONTACT monthly subscription",
+    description: "AICONTACT: 13-day free trial, then monthly until cancelled",
     status: "ACTIVE",
+    // Order matters to PayPal: the trial must be sequence 1 so the paid cycle
+    // follows it. The subscriber approves this whole schedule once, which is
+    // what lets the trial convert to billing without asking again.
     billing_cycles: [
+      {
+        frequency: {
+          interval_unit: TRIAL_INTERVAL_UNIT,
+          interval_count: TRIAL_INTERVAL_COUNT,
+        },
+        tenure_type: "TRIAL",
+        sequence: 1,
+        // Exactly one trial cycle; it must not repeat.
+        total_cycles: 1,
+        pricing_scheme: {
+          fixed_price: { value: "0.00", currency_code: String(currency) },
+        },
+      },
       {
         frequency: { interval_unit: "MONTH", interval_count: 1 },
         tenure_type: "REGULAR",
-        sequence: 1,
+        sequence: 2,
         // 0 = renews until cancelled.
         total_cycles: 0,
         pricing_scheme: {
@@ -71,7 +93,6 @@ export const planPayload = (productId, { price, currency }) => {
   };
 };
 
-/** Existing resources win over creating new ones, so a re-run is a no-op. */
 export const findExistingProduct = (products = []) =>
   products.find(
     (p) => p.name === PRODUCT_NAME || /^aicontact$/i.test(String(p.name || "").trim())
