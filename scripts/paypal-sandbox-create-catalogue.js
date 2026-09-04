@@ -22,6 +22,7 @@ import {
   planPayload,
   findExistingProduct,
   findExistingPlan,
+  findMismatchedPlans,
   PRODUCT_REQUEST_ID,
   PLAN_REQUEST_ID,
 } from "./lib/catalogue";
@@ -133,7 +134,14 @@ const run = async () => {
 
   // --- plan --------------------------------------------------------------
   const plans = (await api("GET", "/v1/billing/plans?page_size=20", accessToken)).plans || [];
-  let plan = findExistingPlan(plans, product ? product.id : null);
+  const spec = { productId: product ? product.id : null, price: PRICE, currency: CURRENCY };
+  let plan = findExistingPlan(plans, spec);
+  if (!plan) {
+    const mismatched = findMismatchedPlans(plans, spec);
+    for (const m of mismatched) {
+      safeLog(`  note: plan ${m.id} "${m.name}" exists but does not match the required terms; leaving it untouched`);
+    }
+  }
 
   if (plan) {
     safeLog(`plan: already exists, reusing  ${plan.id}`);

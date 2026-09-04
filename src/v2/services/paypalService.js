@@ -37,6 +37,64 @@ export const resetTokenCache = () => {
   cachedToken = null;
 };
 
+/**
+ * One bounded retry policy for every PayPal call.
+ *
+ * A 401 usually means the cached token was invalidated server-side before it
+ * expired; the fix is a fresh token, not a failure shown to the user. 429 and
+ * 5xx are transient by definition. Ordinary 4xx are the caller's fault and
+ * must not be retried - repeating a rejected request only delays the error.
+ *
+ * Only the status, the category and the attempt number are logged. Response
+ * bodies are not: they carry subscriber details.
+ */
+const MAX_ATTEMPTS = 3;
+const BACKOFF_MS = [250, 750];
+
+const categorise = (status) => {
+  if (status === 401) return "auth";
+  if (status === 429) return "throttled";
+  if (status >= 500) return "upstream";
+  return "permanent";
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export const paypalFetch = async (label, build) => {
+  let lastStatus = 0;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    const response = await build();
+    if (response.ok || response.status === 404) return response;
+
+    lastStatus = response.status;
+    const category = categorise(response.status);
+
+    if (category === "permanent" || attempt === MAX_ATTEMPTS) {
+      logger.warn("paypal call failed", {
+        call: label,
+        status: response.status,
+        category,
+        attempt,
+      });
+      return response;
+    }
+
+    logger.warn("paypal call retrying", {
+      call: label,
+      status: response.status,
+      category,
+      attempt,
+    });
+
+    // A rejected token is worth nothing; force a fresh one before retrying.
+    if (category === "auth") resetTokenCache();
+    await sleep(BACKOFF_MS[attempt - 1] ?? 750);
+  }
+
+  return { ok: false, status: lastStatus, json: async () => ({}) };
+};
+
 const accessToken = async () => {
   if (cachedToken && cachedToken.expiresAt > Date.now() + 60000) {
     return cachedToken.value;
@@ -74,14 +132,13 @@ const accessToken = async () => {
 };
 
 export const getSubscription = async (subscriptionId) => {
-  const response = await fetch(
-    `${host()}/v1/billing/subscriptions/${encodeURIComponent(subscriptionId)}`,
-    {
+  const response = await paypalFetch("getSubscription", async () =>
+    fetch(`${host()}/v1/billing/subscriptions/${encodeURIComponent(subscriptionId)}`, {
       headers: {
         Authorization: `Bearer ${await accessToken()}`,
         Accept: "application/json",
       },
-    }
+    })
   );
 
   if (response.status === 404) return null;
@@ -319,4 +376,41 @@ export const assertKnownPlan = (planId) => {
       "paypal_unknown_plan"
     );
   }
+};
+
+/**
+ * Which plan a subscribe request should use.
+ *
+ * The client does not choose. A released build that carried a plan id would
+ * pin itself to that plan forever, and a client-supplied id is an input we
+ * would have to validate anyway. So when exactly one plan is configured the
+ * server selects it; only a genuinely multi-plan deployment has to be told
+ * which one, and even then the value must already be on the allowlist.
+ */
+export const resolvePlanId = (requested) => {
+  const configured = config.paypal.planIds;
+
+  if (configured.length === 0) {
+    throw new PaypalError(
+      "No PayPal plan is configured; PAYPAL_PLAN_IDS is empty",
+      "paypal_no_plan_configured",
+      500
+    );
+  }
+
+  if (requested === undefined || requested === null || requested === "") {
+    if (configured.length === 1) return configured[0];
+    throw new PaypalError(
+      "Several plans are configured; plan_id is required",
+      "paypal_plan_id_required",
+      400
+    );
+  }
+
+  if (typeof requested !== "string") {
+    throw new PaypalError("plan_id must be a string", "paypal_unknown_plan", 400);
+  }
+
+  assertKnownPlan(requested);
+  return requested;
 };

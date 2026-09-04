@@ -98,9 +98,62 @@ export const findExistingProduct = (products = []) =>
     (p) => p.name === PRODUCT_NAME || /^aicontact$/i.test(String(p.name || "").trim())
   ) || null;
 
-export const findExistingPlan = (plans = [], productId = null) =>
-  plans.find(
+/**
+ * Whether an existing plan really is the plan we want.
+ *
+ * Matching on name alone is what let the old trial-less plan satisfy a re-run:
+ * the script reported "nothing needs creating" and the corrected plan was never
+ * made. A plan is only reusable if the terms a subscriber is committing to are
+ * the same ones, so compare the whole shape.
+ */
+export const planMatchesSpec = (plan, { productId, price, currency }) => {
+  if (!plan || plan.status !== "ACTIVE") return false;
+  if (productId && plan.product_id !== productId) return false;
+
+  const cycles = plan.billing_cycles || [];
+  if (cycles.length !== 2) return false;
+
+  const trial = cycles.find((c) => c.tenure_type === "TRIAL");
+  const regular = cycles.find((c) => c.tenure_type === "REGULAR");
+  if (!trial || !regular) return false;
+
+  const money = (c) => c.pricing_scheme?.fixed_price || {};
+
+  const trialOk =
+    trial.sequence === 1 &&
+    Number(trial.total_cycles) === 1 &&
+    trial.frequency?.interval_unit === TRIAL_INTERVAL_UNIT &&
+    Number(trial.frequency?.interval_count) === TRIAL_INTERVAL_COUNT &&
+    Number(money(trial).value) === 0 &&
+    money(trial).currency_code === currency;
+
+  const regularOk =
+    regular.sequence === 2 &&
+    Number(regular.total_cycles) === 0 &&
+    regular.frequency?.interval_unit === "MONTH" &&
+    Number(regular.frequency?.interval_count) === 1 &&
+    Number(money(regular).value) === Number(price) &&
+    money(regular).currency_code === currency;
+
+  return trialOk && regularOk;
+};
+
+/**
+ * Returns a reusable plan, or null. A plan whose name matches but whose terms
+ * do not is never returned and is never modified: changing the terms of a plan
+ * people are already subscribed to is not something a setup script should do.
+ */
+export const findExistingPlan = (plans = [], spec = {}) => {
+  const productId = typeof spec === "string" ? spec : spec.productId;
+  const full = typeof spec === "string" ? { productId } : spec;
+  if (!full.price || !full.currency) return null;
+  return plans.find((p) => planMatchesSpec(p, { ...full, productId })) || null;
+};
+
+/** Plans that look like ours by name but do not match the terms we require. */
+export const findMismatchedPlans = (plans = [], spec = {}) =>
+  plans.filter(
     (p) =>
-      p.name === PLAN_NAME ||
-      (productId && p.product_id === productId && /monthly/i.test(p.name || ""))
-  ) || null;
+      (p.name === PLAN_NAME || /aicontact/i.test(String(p.name || ""))) &&
+      !planMatchesSpec(p, spec)
+  );

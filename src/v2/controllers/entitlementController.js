@@ -15,6 +15,7 @@ import {
   createSubscription,
   toEntitlementShape as paypalShape,
   assertKnownPlan,
+  resolvePlanId,
   ownershipMatches,
   hasNoBinding,
   subscriberEmail,
@@ -27,7 +28,7 @@ import {
 import { PaypalLegacyClaim } from "../../models/paypalLegacyClaim";
 import { AuditLog } from "../../models/auditLog";
 import { sendMail } from "../services/mailService";
-import { config } from "../../config/env";
+import { config, paypalEnvironmentLabel } from "../../config/env";
 import crypto from "crypto";
 import { sha256 } from "../../util/crypto";
 import { claimWithLease, settleLease, releaseLease } from "../services/leaseService";
@@ -258,6 +259,7 @@ export const linkPaypal = async (req, res, next) => {
     await upsertEntitlement({
       user: req.user,
       platform: "paypal",
+      environment: paypalEnvironmentLabel(),
       productId: shape.planId,
       status: shape.status,
       startsAt: shape.startsAt,
@@ -284,15 +286,22 @@ export const linkPaypal = async (req, res, next) => {
  */
 export const createPaypalSubscription = async (req, res, next) => {
   try {
-    const planId = requireString(req.body?.plan_id, "plan_id", { max: 64 });
-
+    // The client sends no plan: the server owns plan selection. An explicit
+    // plan_id is still honoured, and still has to be on the allowlist.
+    let planId;
     try {
-      assertKnownPlan(planId);
+      planId = resolvePlanId(req.body?.plan_id);
     } catch (error) {
-      return res.status(400).json({
+      const status = error.statusCode || 400;
+      return res.status(status).json({
         status: "Error",
         code: error.code,
-        message: "That is not an AICONTACT plan.",
+        message:
+          error.code === "paypal_no_plan_configured"
+            ? "Subscriptions are not available right now."
+            : error.code === "paypal_plan_id_required"
+            ? "A plan must be specified."
+            : "That is not an AICONTACT plan.",
       });
     }
 
@@ -543,6 +552,7 @@ export const confirmLegacyPaypalClaim = async (req, res, next) => {
       await upsertEntitlement({
         user: req.user,
         platform: "paypal",
+        environment: paypalEnvironmentLabel(),
         productId: shape.planId,
         status: shape.status,
         startsAt: shape.startsAt,

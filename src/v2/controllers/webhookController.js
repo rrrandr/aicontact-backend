@@ -1,3 +1,4 @@
+import { paypalEnvironmentLabel } from "../../config/env";
 import { WebhookEvent } from "../../models/webhookEvent";
 import { AppleTransaction } from "../../models/appleTransaction";
 import { PaypalSubscription } from "../../models/paypalSubscription";
@@ -353,6 +354,7 @@ export const paypalWebhook = async (req, res, next) => {
       await upsertEntitlement({
         user,
         platform: "paypal",
+        environment: paypalEnvironmentLabel(),
         productId: record.plan_id || shape.planId,
         status: shape.status,
         startsAt: shape.startsAt,

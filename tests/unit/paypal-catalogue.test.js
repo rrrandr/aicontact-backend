@@ -102,12 +102,17 @@ describe("re-run safety", () => {
     expect(findExistingProduct([])).toBeNull();
   });
 
-  it("finds an existing plan by name or by product", () => {
-    expect(findExistingPlan([{ id: "PL1", name: PLAN_NAME }])).toBeTruthy();
+  // Reuse is now decided by the plan's terms, not its name. Matching on name
+  // alone is what let the trial-less plan satisfy a re-run, so the script
+  // reported "nothing needs creating" and never made the corrected plan.
+  // Full term-matching is covered in tests/unit/catalogue-matching.test.js.
+  it("does not reuse a plan just because the name or product matches", () => {
+    const spec = { productId: "PROD-1", price: "6.00", currency: "USD" };
+    expect(findExistingPlan([{ id: "PL1", name: PLAN_NAME }], spec)).toBeNull();
     expect(
-      findExistingPlan([{ id: "PL1", name: "Monthly", product_id: "PROD-1" }], "PROD-1")
-    ).toBeTruthy();
-    expect(findExistingPlan([{ id: "PL1", name: "Annual", product_id: "OTHER" }], "PROD-1")).toBeNull();
-    expect(findExistingPlan([])).toBeNull();
+      findExistingPlan([{ id: "PL1", name: "Monthly", product_id: "PROD-1" }], spec)
+    ).toBeNull();
+    expect(findExistingPlan([{ id: "PL1", name: "Annual", product_id: "OTHER" }], spec)).toBeNull();
+    expect(findExistingPlan([], spec)).toBeNull();
   });
 });

@@ -222,6 +222,15 @@ function secret(name) {
  * Touches every value v2 needs so a misconfigured deployment fails at boot
  * rather than at the first purchase. Called from index.js when v2 is enabled.
  */
+/**
+ * The stored label for an entitlement created against PayPal.
+ *
+ * Derived from the environment actually in use, so a sandbox entitlement can
+ * never be recorded as production data.
+ */
+export const paypalEnvironmentLabel = () =>
+  config.paypal.env === "sandbox" ? "Sandbox" : "Production";
+
 export const assertV2Config = () => {
   const checks = [
     () => config.auth.accessSecret,
