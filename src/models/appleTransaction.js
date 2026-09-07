@@ -12,6 +12,9 @@ const appleTransactionSchema = new mongoose.Schema({
   user_id: { type: mongoose.Schema.Types.ObjectId, ref: "user", index: true },
 
   product_id: String,
+  // "trial" while the introductory free trial is running, "paid" afterwards.
+  // Read from Apple's offer fields, never inferred from dates.
+  phase: { type: String, enum: ["trial", "paid", "unknown"], default: "unknown" },
   purchase_date: Date,
   expires_date: Date,
   revocation_date: Date,

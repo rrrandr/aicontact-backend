@@ -13,6 +13,7 @@ import {
 import {
   verifyWebhookSignature,
   toEntitlementShape,
+  subscriptionPhase as applePhase,
   getSubscription,
   subscriptionPhase,
 } from "../services/paypalService";
@@ -181,6 +182,7 @@ export const appleWebhook = async (req, res, next) => {
           $set: {
             transaction_id: transaction.transactionId,
             product_id: transaction.productId,
+            phase: applePhase(transaction),
             expires_date: transaction.expiresDate ? new Date(transaction.expiresDate) : null,
             environment: data.environment,
             last_notification_uuid: eventId,
@@ -235,6 +237,7 @@ export const appleWebhook = async (req, res, next) => {
       { original_transaction_id: originalTransactionId },
       {
         $set: {
+          phase: applePhase(transaction),
           expires_date: transaction.expiresDate ? new Date(transaction.expiresDate) : null,
           revocation_date: transaction.revocationDate
             ? new Date(transaction.revocationDate)

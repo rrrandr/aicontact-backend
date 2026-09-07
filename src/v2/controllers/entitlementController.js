@@ -132,6 +132,7 @@ export const verifyApple = async (req, res, next) => {
     const claim = await claimAppleTransaction(originalTransactionId, req.user._id, {
       transaction_id: shape.transactionId,
       product_id: shape.productId,
+      phase: shape.phase,
       purchase_date: shape.startsAt,
       expires_date: shape.expiresAt,
       revocation_date: shape.revocationDate,

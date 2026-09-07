@@ -240,6 +240,32 @@ export const assertProductAllowed = (productId) => {
  * selected by original transaction id. Taking the first entry reads a
  * different subscription's state onto this purchase.
  */
+/**
+ * Whether this transaction is the free trial or a paid period.
+ *
+ * Read from Apple's own bookkeeping rather than inferred from dates, for the
+ * same reason the PayPal side reads it from cycle_executions: a trial that is
+ * mistaken for a paid period would have its access preserved on cancellation,
+ * handing somebody paid time they never paid for.
+ *
+ * offerType 1 is an introductory offer. offerDiscountType distinguishes a free
+ * trial from a discounted one - only the free trial is our trial. Older
+ * transactions predate offerDiscountType, so offerType 1 alone is treated as a
+ * trial rather than as unknown: on this product the only introductory offer
+ * that has ever existed is the free trial.
+ */
+export const subscriptionPhase = (transaction) => {
+  if (!transaction || transaction.offerType === undefined) return "unknown";
+
+  const introductory = Number(transaction.offerType) === 1;
+  if (!introductory) return "paid";
+
+  const discount = transaction.offerDiscountType;
+  if (discount === undefined) return "trial";
+
+  return discount === "FREE_TRIAL" ? "trial" : "paid";
+};
+
 export const toEntitlementShape = (statusResponse, originalTransactionId) => {
   const all = (statusResponse?.data || []).flatMap(
     (group) => group?.lastTransactions || []
@@ -266,6 +292,7 @@ export const toEntitlementShape = (statusResponse, originalTransactionId) => {
   const status = STATUS[last.status] || "expired";
 
   return {
+    phase: subscriptionPhase(transaction),
     originalTransactionId: last.originalTransactionId,
     transactionId: transaction.transactionId,
     productId: transaction.productId,

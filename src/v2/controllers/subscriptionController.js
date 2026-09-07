@@ -1,5 +1,6 @@
 import { Entitlement } from "../../models/entitlement";
 import { PaypalSubscription } from "../../models/paypalSubscription";
+import { AppleTransaction } from "../../models/appleTransaction";
 import {
   CancellationFeedback,
   FEEDBACK_REASONS,
@@ -23,16 +24,31 @@ import { logger } from "../../util/logger";
 // fallback, not the primary route: cancelling in the app is one button.
 export const PAYPAL_AUTOPAY_URL = "https://www.paypal.com/myaccount/autopay/";
 
+/**
+ * Where an App Store subscriber manages their subscription.
+ *
+ * Apple does not let a third party cancel on a subscriber's behalf, and the
+ * guidelines require the app to send them here. So on Apple the Cancel button
+ * is not a button that cancels - it is a link, and the client must not claim
+ * otherwise.
+ */
+export const APPLE_MANAGE_URL = "https://apps.apple.com/account/subscriptions";
+
 const toIso = (value) => (value ? new Date(value).toISOString() : null);
 
 /**
  * What the "Manage Subscription" screen renders.
  *
  * Derived from the entitlement, which is the authority, with the trial/paid
- * distinction taken from PayPal's cycle bookkeeping rather than guessed from
- * dates.
+ * distinction taken from the provider's own bookkeeping rather than guessed
+ * from dates - PayPal's cycle executions, Apple's offer fields.
+ *
+ * The provider decides one thing beyond that: whether we can cancel at all.
+ * We can end a PayPal subscription; Apple does not permit it, so an App Store
+ * subscriber is sent to their App Store settings instead.
  */
 export const buildSubscriptionView = (entitlement, record) => {
+  const apple = entitlement?.platform === "apple";
   const active = isActive(entitlement);
   const cancelled = Boolean(entitlement?.cancelled_at || record?.cancelled_at);
   const phase = record?.phase && record.phase !== "unknown" ? record.phase : null;
@@ -69,19 +85,33 @@ export const buildSubscriptionView = (entitlement, record) => {
     cancellation_source:
       entitlement?.cancellation_source || record?.cancellation_source || null,
     // Only a live PayPal subscription that has not already been cancelled can
-    // be cancelled from here.
-    can_cancel: Boolean(record) && !cancelled,
-    manage_url: PAYPAL_AUTOPAY_URL,
+    // be cancelled from here. An Apple subscription never can: the client must
+    // send the subscriber to their App Store settings rather than offering a
+    // button that cannot do what it says.
+    can_cancel: apple ? false : Boolean(record) && !cancelled,
+    manage_url: apple ? APPLE_MANAGE_URL : PAYPAL_AUTOPAY_URL,
   };
 };
 
 export const getSubscription = async (req, res, next) => {
   try {
-    const [entitlement, record, feedback] = await Promise.all([
-      Entitlement.findOne({ user_id: req.user._id, platform: "paypal" }),
-      PaypalSubscription.findOne({ user_id: req.user._id }),
-      CancellationFeedback.exists({ subject_id: req.user.subject_id }),
-    ]);
+    // Whichever provider this account actually bought through. Looking only at
+    // PayPal showed an App Store subscriber an empty screen.
+    const [paypalEntitlement, appleEntitlement, paypalRecord, appleRecord, feedback] =
+      await Promise.all([
+        Entitlement.findOne({ user_id: req.user._id, platform: "paypal" }),
+        Entitlement.findOne({ user_id: req.user._id, platform: "apple" }),
+        PaypalSubscription.findOne({ user_id: req.user._id }),
+        AppleTransaction.findOne({ user_id: req.user._id }),
+        CancellationFeedback.exists({ subject_id: req.user.subject_id }),
+      ]);
+
+    // An account should only ever have one, but if both exist the live one
+    // wins - and PayPal breaks the tie, because that is the subscription this
+    // app can actually manage.
+    const useApple = !isActive(paypalEntitlement) && isActive(appleEntitlement);
+    const entitlement = useApple ? appleEntitlement : paypalEntitlement;
+    const record = useApple ? appleRecord : paypalRecord;
 
     return res.status(200).json({
       status: "Success",
