@@ -173,7 +173,7 @@ export const config = {
     // Where the four documents are published. Quoted in the terms-change
     // notice, so it has to be the real address rather than a guess.
     get publicUrl() {
-      return process.env.LEGAL_DOCUMENTS_URL || "https://facestreamai.com/legal";
+      return process.env.LEGAL_DOCUMENTS_URL || "https://aicontact.ai/legal";
     },
   },
 
