@@ -201,10 +201,16 @@ describeIfSsl("webhook delivery recovery", () => {
       const retry = await withSignature(request(app).post("/api/v2/webhooks/paypal")).send(body);
       expect(retry.status).toBe(200);
 
+      // The retry, not the first delivery, is what recorded the cancellation.
+      // Access is preserved to the period already paid for, so the evidence
+      // that the event was processed is that renewal stopped.
       const after = await request(app)
         .get("/api/v2/entitlements")
         .set("Authorization", `Bearer ${tokens.access_token}`);
-      expect(after.body.entitlement.active).toBe(false);
+      expect(after.body.entitlement.auto_renew).toBe(false);
+
+      const record = await PaypalSubscription.findOne({ subscription_id: "I-RECOVER0001" });
+      expect(record.cancelled_at).toBeTruthy();
     });
   });
 
@@ -290,6 +296,7 @@ describeIfSsl("webhook delivery recovery", () => {
             id: "I-RENEW00002",
             custom_id: user.subject_id,
             status: "CANCELLED",
+            billing_info: {},
           }),
         },
       });
@@ -304,7 +311,13 @@ describeIfSsl("webhook delivery recovery", () => {
         .get("/api/v2/entitlements")
         .set("Authorization", `Bearer ${tokens.access_token}`);
 
-      expect(after.body.entitlement.active).toBe(false);
+      // Had the event body been believed, this would still be renewing. The
+      // paid period is preserved, but nothing will be charged again.
+      expect(after.body.entitlement.auto_renew).toBe(false);
+
+      const record = await PaypalSubscription.findOne({ subscription_id: "I-RENEW00002" });
+      expect(record.status).toBe("CANCELLED");
+      expect(record.cancelled_at).toBeTruthy();
     });
   });
 });

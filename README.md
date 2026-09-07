@@ -104,6 +104,49 @@ Renewals are handled: `PAYMENT.SALE.COMPLETED` and the subscription lifecycle
 events all trigger an authoritative re-read from PayPal, so `next_billing_time`
 cannot go stale and strand a paying subscriber.
 
+### Cancelling a subscription
+
+`POST /api/v2/entitlements/paypal/cancel` stops future renewals for the
+authenticated account. It takes **no subscription id**: the server cancels
+whatever is linked to the caller, so there is no request shape that could name
+somebody else's subscription. PayPal's `custom_id` binding is re-checked as an
+independent second proof.
+
+The order matters. The subscription is read from PayPal **before** it is
+cancelled, because `billing_info.next_billing_time` is the date access has been
+paid through — the trial's scheduled end while the trial runs, the end of the
+paid month afterwards — and PayPal clears it the moment the subscription is
+cancelled. That date is stored as `access_ends_at` on both the entitlement and
+the `paypal_subscriptions` row, and access continues until it. Cancelling
+during the trial therefore preserves the trial's own end and does not hand out
+a paid month.
+
+`access_ends_at` is then a **floor**. `upsertEntitlement` will not write an
+expiry earlier than it, and turns the `expired` status a cancellation
+notification implies back into `active` while the date is still ahead. Without
+that, the `BILLING.SUBSCRIPTION.CANCELLED` webhook — which arrives seconds
+later carrying no billing date at all — would revoke a period the subscriber
+paid for, and would do it again on every provider retry. Only `refunded` and
+`revoked` are allowed past the floor, because those are statements that the
+period was not paid for after all.
+
+Cancellation is **idempotent by record, not by request**. A second click finds
+`cancelled_at` already set, returns `already_cancelled: true` with a 200, and
+does not reach PayPal — which matters, because re-deriving the access-end date
+at that point would replace a real date with nothing. The `Idempotency-Key`
+header is honoured as well, but it is not what makes a second click safe.
+
+**Failure is closed.** Unless PayPal's own record confirms the subscription is
+no longer billing, the endpoint returns 503 `cancellation_unconfirmed`, writes
+nothing locally, and records a `pending_cancellations` job for the same
+maintenance loop that covers deletion. Telling someone they had cancelled
+because a local write succeeded is the one outcome worth failing loudly over.
+
+Cancelling never touches the account. Feedback is a separate call
+(`POST /api/v2/entitlements/paypal/cancel/feedback`) that is only accepted
+*after* a cancellation is recorded, so it can never become a step on the way to
+cancelling; both its fields are optional.
+
 ### Deletion and billing
 
 Account deletion cancels a linked PayPal subscription and then **confirms with
@@ -119,6 +162,35 @@ which is "already inactive". What settles it is reading the subscription back.
 Only `CANCELLED`, `EXPIRED`, or a subscription PayPal no longer has satisfies
 deletion. **`SUSPENDED` does not** — suspension pauses collection but leaves
 the billing agreement in place and it can be reactivated.
+
+### The weekly owner summary
+
+One message a week instead of one per signup and one per cancellation. Off by
+default (`WEEKLY_REPORT_ENABLED=false`, `OWNER_REPORT_TO` empty), so upgrading
+the code sends nothing.
+
+Every number comes from a durable database record. Registrations are counted
+from the account's own `_id`, whose embedded timestamp survives the tombstoning
+deletion applies, and deletions from `users.deleted_at` — both already existed,
+so nothing new is stored for them. Only the two moments nothing recorded needed
+new fields: `paypal_subscriptions.activated_at`, written once when PayPal first
+reports a subscription live, and `cancelled_at` with `cancellation_source`.
+Trial and paid counts come from `phase`, taken from PayPal's own cycle
+bookkeeping rather than guessed from dates; subscriptions linked before that
+field existed are reported on their own line rather than folded into either
+bucket.
+
+The window runs Monday 09:00 to Monday 09:00 in `WEEKLY_REPORT_TIMEZONE`,
+computed in local time on both ends so consecutive weeks abut exactly across
+the two clock changes a year. Every instant during a week resolves to the same
+window, which is what makes delivery idempotent: the window is the unique key
+of the `weekly_reports` row, so a retry, a restart or a second process finds
+the week already sent and does nothing. A delivery that fails is kept, marked
+`failed`, and retried with the same window rather than skipped.
+
+The message carries counts only — no addresses, no identifiers, no credentials
+— and its subject reads "AICONTACT weekly billing summary", so it is not
+mistaken for an outage alarm arriving at the same address.
 
 ### Retention
 
@@ -387,3 +459,63 @@ Take a database snapshot first.
 GitHub. There is currently no CI/CD attached to this repository, and
 production runs on infrastructure reached at `snapcamera-be.invo.zone`.
 Deployment is deliberately untouched here.
+
+### Enabling the weekly owner summary
+
+The report is written and tested but **off, and with its transport set to
+`log`, which sends nothing**. Four steps, in this order.
+
+1. **Grant the instance permission to publish.** The summary goes to the
+   existing `AICONTACT-Production-Alerts` topic, whose email subscription is
+   already confirmed, so nothing new has to be verified and nothing about who
+   receives it lives in this repository.
+
+   `infra/weekly-report-sns-publish.yaml` is a CloudFormation stack granting
+   one action on one resource: `sns:Publish` on that topic. It cannot create
+   topics, subscribe anyone, read subscriber addresses, or publish elsewhere.
+   Verify both parameters and review the change set first; see `infra/README.md`.
+
+2. **Set the variables** in `/opt/aicontact/shared/.env`:
+
+   ```
+   WEEKLY_REPORT_ENABLED=true
+   OWNER_REPORT_TRANSPORT=sns
+   OWNER_REPORT_SNS_TOPIC_ARN=arn:aws:sns:us-east-2:851725546085:AICONTACT-Production-Alerts
+   OWNER_REPORT_AWS_REGION=us-east-2
+   WEEKLY_REPORT_TIMEZONE=America/New_York
+   WEEKLY_REPORT_CHECK_INTERVAL_MS=900000
+   ```
+
+   `MAIL_PROVIDER` is not involved and does not need changing: it carries
+   customer mail, and the two are routed separately on purpose.
+
+3. **There is no cron step.** The summary is driven by the in-process
+   maintenance loop started in `index.js`, which ticks every
+   `WEEKLY_REPORT_CHECK_INTERVAL_MS` and asks whether the completed week has
+   been delivered yet. The Monday 09:00 boundary comes from the window, not
+   from when the tick happens, so what this actually requires is that the
+   process runs continuously - which PM2 already ensures. A restart at any
+   point loses nothing: the window is the key, and a week already sent is
+   never sent twice.
+
+   The backend runs on Node 18, so `@aws-sdk/client-sns` is pinned to 3.967.0,
+   the last release that still declares Node 18 support. Do not let a routine
+   `npm update` move it until the runtime is upgraded; a newer SDK refuses to
+   install on Node 18.
+
+4. **Confirm delivery on the first Monday.** A report the transport did not
+   send is recorded `status: "failed"` with the reason, not `sent`, and retried
+   on the next tick - so a misconfiguration shows up as a stuck row rather than
+   a week that vanished:
+
+   ```
+   db.weekly_reports.find().sort({period_end: -1}).limit(4)
+   ```
+
+   Expect one row per week, `status: "sent"`, `sent_at` set, `attempts: 1`.
+   `pm2 logs` also warns at boot if the report is enabled while the transport
+   is `log` or has no destination.
+
+To roll back, set `WEEKLY_REPORT_ENABLED=false` and restart. Nothing else
+depends on it, and no per-event mail exists to fall back to — there never was
+any.

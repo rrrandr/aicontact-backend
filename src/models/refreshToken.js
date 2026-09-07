@@ -18,8 +18,6 @@ const refreshTokenSchema = new mongoose.Schema({
   revoked_at: Date,
   replaced_by: String,
 
-  user_agent: String,
-  ip_hash: String,
 });
 
 export const RefreshToken = mongoose.model("refresh_token", refreshTokenSchema);

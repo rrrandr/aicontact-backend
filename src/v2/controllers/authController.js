@@ -4,7 +4,7 @@ import { PasswordReset } from "../../models/passwordReset";
 import { AuditLog } from "../../models/auditLog";
 import { config } from "../../config/env";
 import { isValidEmail, normalizeEmail } from "../../util/email";
-import { randomToken, sha256, hashIp, newSubjectId } from "../../util/crypto";
+import { randomToken, sha256, newSubjectId } from "../../util/crypto";
 import { requirePassword, requireString, ValidationError } from "../middleware/validate";
 import {
   issueTokenPair,
@@ -75,7 +75,6 @@ export const register = async (req, res, next) => {
       action: "account.register",
       user_id: user._id,
       subject_id: user.subject_id,
-      ip_hash: hashIp(req.ip),
     });
 
     return res.status(201).json({
@@ -369,7 +368,6 @@ export const resetPassword = async (req, res, next) => {
         action: "account.password_reset",
         user_id: updated._id,
         subject_id: updated.subject_id,
-        ip_hash: hashIp(req.ip),
       });
     } catch (error) {
       // Best effort. token_version was already bumped in the write above, so

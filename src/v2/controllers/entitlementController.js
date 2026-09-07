@@ -16,6 +16,7 @@ import {
   toEntitlementShape as paypalShape,
   assertKnownPlan,
   resolvePlanId,
+  subscriptionPhase,
   ownershipMatches,
   hasNoBinding,
   subscriberEmail,
@@ -245,6 +246,10 @@ export const linkPaypal = async (req, res, next) => {
       plan_id: shape.planId,
       status: shape.rawStatus,
       next_billing_time: shape.expiresAt,
+      phase: subscriptionPhase(subscription),
+      // Linking an already-live subscription is the moment we first observe
+      // an approval, and the weekly tally counts approvals from this field.
+      activated_at: new Date(),
       updated_at: new Date(),
     });
 
@@ -536,6 +541,7 @@ export const confirmLegacyPaypalClaim = async (req, res, next) => {
         plan_id: shape.planId,
         status: shape.rawStatus,
         next_billing_time: shape.expiresAt,
+        phase: subscriptionPhase(subscription),
         legacy_claim: true,
         updated_at: new Date(),
       });

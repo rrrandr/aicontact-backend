@@ -24,6 +24,21 @@ const entitlementSchema = new mongoose.Schema(
     starts_at: Date,
     expires_at: { type: Date, index: true },
     auto_renew: { type: Boolean, default: false },
+
+    // The date access has already been paid for, captured from the provider
+    // BEFORE the subscription was cancelled.
+    //
+    // It exists because the cancellation notification is too late to compute
+    // it: PayPal clears next_billing_time once a subscription is cancelled, so
+    // a webhook that recalculated expiry from the current record would cut the
+    // subscriber off from a period they have already paid for. Once written,
+    // this is a floor - nothing but a refund or revocation may shorten it.
+    access_ends_at: Date,
+    cancelled_at: Date,
+    cancellation_source: {
+      type: String,
+      enum: ["user", "account_deletion", "provider"],
+    },
     environment: { type: String, enum: ["Production", "Sandbox"], default: "Production" },
 
     // Which provider record produced this row, for tracing back.

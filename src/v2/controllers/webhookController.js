@@ -1,4 +1,4 @@
-import { paypalEnvironmentLabel } from "../../config/env";
+import { config, paypalEnvironmentLabel } from "../../config/env";
 import { WebhookEvent } from "../../models/webhookEvent";
 import { AppleTransaction } from "../../models/appleTransaction";
 import { PaypalSubscription } from "../../models/paypalSubscription";
@@ -14,8 +14,10 @@ import {
   verifyWebhookSignature,
   toEntitlementShape,
   getSubscription,
+  subscriptionPhase,
 } from "../services/paypalService";
 import { upsertEntitlement } from "../services/entitlementService";
+import { sendEnrollmentConfirmation } from "../services/customerMail";
 import { logger } from "../../util/logger";
 import { randomToken } from "../../util/crypto";
 
@@ -278,6 +280,10 @@ const PAYPAL_HANDLED = new Set([
   "PAYMENT.SALE.REVERSED",
 ]);
 
+// Statuses that mean PayPal will not charge again. SUSPENDED is absent for the
+// same reason it is absent from the cancellation check: it can be reactivated.
+const ENDS_BILLING = new Set(["CANCELLED", "EXPIRED"]);
+
 // Subscription events carry the id directly; payment events reference it as
 // the billing agreement.
 const paypalSubscriptionId = (event) =>
@@ -339,17 +345,48 @@ export const paypalWebhook = async (req, res, next) => {
       }
 
       const shape = toEntitlementShape(subscription);
+      const phase = subscriptionPhase(subscription);
+      const now = new Date();
 
-      await PaypalSubscription.updateOne(
-        { subscription_id: subscriptionId },
-        {
-          $set: {
-            status: shape.rawStatus,
-            next_billing_time: shape.expiresAt,
-            updated_at: new Date(),
-          },
-        }
-      );
+      // The date the subscriber has already paid through.
+      //
+      // A cancellation notification arrives after PayPal has cleared
+      // next_billing_time, so by the time we read it there is nothing left to
+      // compute from. When we cancelled it ourselves the date is already
+      // recorded; when the subscriber cancelled in PayPal's own interface we
+      // are learning of it now, and the expiry we last held IS the end of the
+      // period they paid for. Either way it must not be recalculated to null.
+      const existing = await Entitlement.findOne({ user_id: user._id, platform: "paypal" });
+      const endsNow = ENDS_BILLING.has(shape.rawStatus);
+      const preserveAccessUntil = endsNow
+        ? record.access_ends_at || existing?.access_ends_at || existing?.expires_at || null
+        : null;
+
+      const update = {
+        status: shape.rawStatus,
+        next_billing_time: shape.expiresAt,
+        phase,
+        updated_at: now,
+      };
+
+      // Written once, the first time PayPal reports the subscription live.
+      // This is the durable record of an approval; the row itself was created
+      // when the subscribe request was made, which is a different moment.
+      const firstActivation = shape.rawStatus === "ACTIVE" && !record.activated_at;
+      if (firstActivation) {
+        update.activated_at = now;
+      }
+
+      // Only when we did not already record it. A cancellation we performed
+      // ourselves holds the authoritative access-end date, and this path must
+      // not replace it with whatever is left in PayPal's record afterwards.
+      if (endsNow && !record.cancelled_at) {
+        update.cancelled_at = now;
+        update.cancellation_source = "provider";
+        if (preserveAccessUntil) update.access_ends_at = preserveAccessUntil;
+      }
+
+      await PaypalSubscription.updateOne({ subscription_id: subscriptionId }, { $set: update });
 
       await upsertEntitlement({
         user,
@@ -361,7 +398,28 @@ export const paypalWebhook = async (req, res, next) => {
         expiresAt: shape.expiresAt,
         autoRenew: shape.autoRenew,
         sourceRef: subscriptionId,
+        preserveAccessUntil,
       });
+
+      // The retainable confirmation of what was agreed, once the subscription
+      // is actually live.
+      //
+      // Deliberately after the entitlement write and deliberately swallowed: a
+      // mail provider having a bad day must never cost somebody the access
+      // they have just paid for. An unsent confirmation stays pending in the
+      // ledger and the retry job picks it up.
+      if (firstActivation && config.customerMail.enrollmentConfirmationEnabled) {
+        try {
+          await sendEnrollmentConfirmation({
+            user,
+            subscriptionId,
+            planId: record.plan_id || shape.planId,
+            record: { ...record.toObject(), ...update },
+          });
+        } catch (error) {
+          logger.error("enrollment confirmation failed", { error: error.message });
+        }
+      }
 
       await complete("paypal", eventId, event.event_type, lease);
       return res.status(200).json({ status: "Success" });

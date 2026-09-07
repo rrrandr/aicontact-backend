@@ -155,6 +155,72 @@ export const getSubscription = async (subscriptionId) => {
 };
 
 /**
+ * The plan behind a subscription, which is where the price actually lives.
+ *
+ * We deliberately do not keep a copy of the price in our own configuration.
+ * A confirmation that quotes a figure we stored is only as good as the last
+ * time somebody remembered to update it; PayPal's plan is what the customer
+ * will actually be charged, so that is what gets quoted to them.
+ */
+export const getPlan = async (planId) => {
+  const response = await paypalFetch("getPlan", async () =>
+    fetch(`${host()}/v1/billing/plans/${encodeURIComponent(planId)}`, {
+      headers: {
+        Authorization: `Bearer ${await accessToken()}`,
+        Accept: "application/json",
+      },
+    })
+  );
+
+  if (response.status === 404) return null;
+
+  if (!response.ok) {
+    throw new PaypalError(
+      `PayPal plan lookup failed (${response.status})`,
+      "paypal_plan_lookup_failed",
+      502
+    );
+  }
+
+  return response.json();
+};
+
+/**
+ * The offer terms, as PayPal holds them: what the trial is, what the charge is
+ * afterwards, and how often it repeats.
+ *
+ * Returns null rather than a partial answer. A subscription confirmation that
+ * cannot state the price is not worth sending - it would be a notice that
+ * fails at the one thing the notice is for - so the caller retries instead.
+ */
+export const planOfferTerms = (plan) => {
+  const cycles = plan?.billing_cycles;
+  if (!Array.isArray(cycles) || cycles.length === 0) return null;
+
+  const trial = cycles.find((c) => c.tenure_type === "TRIAL");
+  const regular = cycles.find((c) => c.tenure_type === "REGULAR");
+
+  const price = regular?.pricing_scheme?.fixed_price;
+  if (!price || !price.value || !price.currency_code) return null;
+
+  const frequency = regular?.frequency;
+  if (!frequency?.interval_unit) return null;
+
+  const trialFrequency = trial?.frequency;
+
+  return {
+    currency: price.currency_code,
+    amount: price.value,
+    intervalUnit: String(frequency.interval_unit).toLowerCase(),
+    intervalCount: frequency.interval_count ?? 1,
+    trialUnit: trialFrequency ? String(trialFrequency.interval_unit).toLowerCase() : null,
+    trialCount: trialFrequency
+      ? (trialFrequency.interval_count ?? 1) * (trial.total_cycles ?? 1)
+      : 0,
+  };
+};
+
+/**
  * Creates a subscription with the account binding set by us.
  *
  * custom_id comes from the session, never from the request body, and PayPal
@@ -413,4 +479,47 @@ export const resolvePlanId = (requested) => {
 
   assertKnownPlan(requested);
   return requested;
+};
+
+/**
+ * Which phase of the plan the subscription is currently in.
+ *
+ * The trial and the monthly billing that follows it are one agreement, so the
+ * only way to tell them apart is PayPal's own cycle bookkeeping. This matters
+ * at cancellation: a trial must not be treated as a paid period the subscriber
+ * is entitled to finish.
+ */
+export const subscriptionPhase = (subscription) => {
+  const executions = subscription?.billing_info?.cycle_executions;
+  if (!Array.isArray(executions) || executions.length === 0) return "unknown";
+
+  const tenure = (name) =>
+    executions.find((entry) => String(entry?.tenure_type || "").toUpperCase() === name);
+
+  const trial = tenure("TRIAL");
+  if (trial) {
+    const total = Number(trial.total_cycles ?? 0);
+    const completed = Number(trial.cycles_completed ?? 0);
+    // total_cycles 0 is PayPal's "unlimited"; either way a trial with cycles
+    // left to run is still a trial.
+    if (total === 0 || completed < total) return "trial";
+  }
+
+  return tenure("REGULAR") ? "paid" : "unknown";
+};
+
+/**
+ * The date access has already been paid for, read from the subscription as it
+ * stands BEFORE cancellation.
+ *
+ * next_billing_time is the end of the current cycle in both phases: the trial's
+ * scheduled end while the trial runs, and the end of the paid month afterwards.
+ * PayPal clears it once the subscription is cancelled, which is exactly why the
+ * value has to be taken from the pre-cancellation snapshot and then kept.
+ */
+export const paidThrough = (subscription) => {
+  const next = subscription?.billing_info?.next_billing_time;
+  if (!next) return null;
+  const parsed = new Date(next);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 };

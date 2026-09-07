@@ -43,6 +43,15 @@ describe("registration input handling", () => {
       .post("/api/user/register")
       .send({ email: "short@example.com", password: "abc", terms_accepted: "false" });
     expect(res.status).toBe(400);
+    expect(res.body.message).toContain("at least 8 characters");
+  });
+
+  it("rejects an obvious common password even when padded to the minimum", async () => {
+    const res = await request(app)
+      .post("/api/user/register")
+      .send({ email: "common@example.com", password: "   password123   ", terms_accepted: "false" });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe("Choose a less common password.");
   });
 
   it("rejects a malformed email", async () => {

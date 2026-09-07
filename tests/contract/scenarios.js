@@ -13,19 +13,19 @@ module.exports = [
     name: "register-new",
     method: "post",
     path: "/api/user/register",
-    body: { email: EMAIL, password: "correct-horse", subscription_date: null, terms_accepted: "false" },
+    body: { email: EMAIL, password: "correct-horse-passphrase", subscription_date: null, terms_accepted: "false" },
   },
   {
     name: "register-duplicate",
     method: "post",
     path: "/api/user/register",
-    body: { email: EMAIL, password: "correct-horse", subscription_date: null, terms_accepted: "false" },
+    body: { email: EMAIL, password: "correct-horse-passphrase", subscription_date: null, terms_accepted: "false" },
   },
   {
     name: "login-success",
     method: "post",
     path: "/api/user/login",
-    body: { email: EMAIL, password: "correct-horse" },
+    body: { email: EMAIL, password: "correct-horse-passphrase" },
   },
   {
     name: "login-wrong-password",
@@ -37,7 +37,7 @@ module.exports = [
     name: "login-unknown-email",
     method: "post",
     path: "/api/user/login",
-    body: { email: "nobody@example.com", password: "correct-horse" },
+    body: { email: "nobody@example.com", password: "correct-horse-passphrase" },
   },
   {
     name: "get-found",

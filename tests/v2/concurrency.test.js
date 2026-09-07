@@ -212,7 +212,7 @@ describeIfSsl("concurrent requests", () => {
         Array.from({ length: PARALLEL }, (_unused, index) =>
           request(app)
             .post("/api/v2/auth/password/reset")
-            .send({ token: "known-reset-token", password: `new-password-${index}` })
+            .send({ token: "known-reset-token", password: `new-password-passphrase-${index}` })
         )
       );
 

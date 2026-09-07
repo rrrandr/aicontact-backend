@@ -228,13 +228,23 @@ describeIfSsl("webhooks", () => {
       expect(res.status).toBe(400);
     });
 
-    it("ends entitlement when a subscription is cancelled", async () => {
+    it("stops renewal on cancellation but keeps the period already paid for", async () => {
+      // PayPal clears next_billing_time the moment a subscription is
+      // cancelled, so the notification carries nothing to compute an expiry
+      // from. Deriving one from it anyway would revoke a month the subscriber
+      // has already bought - and the event is replayed on every retry, so it
+      // would do it again and again.
       const tokens = await register("wh-pp-cancel@example.com");
       const { subjectId } = await linkPaypal(
         tokens,
         "I-WHCANCEL001",
         "wh-pp-cancel@example.com"
       );
+
+      const paidThrough = (
+        await Entitlement.findOne({ source_ref: "I-WHCANCEL001" })
+      ).expires_at;
+      expect(paidThrough.getTime()).toBeGreaterThan(Date.now());
 
       installFetchStub({
         ...paypalAuthRoute,
@@ -244,6 +254,8 @@ describeIfSsl("webhooks", () => {
             id: "I-WHCANCEL001",
             custom_id: subjectId,
             status: "CANCELLED",
+            // As PayPal actually reports it once cancelled.
+            billing_info: {},
           }),
         },
       });
@@ -254,6 +266,136 @@ describeIfSsl("webhooks", () => {
         resource: paypalSubscription({ id: "I-WHCANCEL001", status: "CANCELLED" }),
       });
       expect(res.status).toBe(200);
+
+      const after = await request(app)
+        .get("/api/v2/entitlements")
+        .set("Authorization", `Bearer ${tokens.access_token}`);
+
+      expect(after.body.entitlement.active).toBe(true);
+      expect(after.body.entitlement.auto_renew).toBe(false);
+      expect(new Date(after.body.entitlement.expires_at).getTime()).toBe(
+        paidThrough.getTime()
+      );
+
+      const record = await PaypalSubscription.findOne({ subscription_id: "I-WHCANCEL001" });
+      expect(record.cancelled_at).toBeTruthy();
+      expect(record.cancellation_source).toBe("provider");
+      expect(record.access_ends_at.getTime()).toBe(paidThrough.getTime());
+    });
+
+    it("sends the retainable confirmation once, the first time PayPal says ACTIVE", async () => {
+      // The confirmation exists because New York requires the subscriber to be
+      // given the offer terms in a form they can keep. It has to fire from the
+      // webhook, which is the moment the subscription is genuinely live, and it
+      // has to fire exactly once however often PayPal repeats the event.
+      process.env.CUSTOMER_ENROLLMENT_CONFIRMATION_ENABLED = "true";
+      const sendMail = jest
+        .spyOn(require("../../src/v2/services/mailService"), "sendMail")
+        .mockResolvedValue({ delivered: true });
+
+      try {
+        const tokens = await register("wh-pp-confirm@example.com");
+        const { subjectId } = await linkPaypal(
+          tokens,
+          "I-WHCONFIRM01",
+          "wh-pp-confirm@example.com"
+        );
+
+        // Not yet activated by a webhook, whatever the link did.
+        await PaypalSubscription.updateOne(
+          { subscription_id: "I-WHCONFIRM01" },
+          { $unset: { activated_at: 1 }, $set: { plan_id: "P-PLAN" } }
+        );
+
+        installFetchStub({
+          ...paypalAuthRoute,
+          ...verifyRoute("SUCCESS"),
+          "/v1/billing/plans/": {
+            body: {
+              id: "P-PLAN",
+              billing_cycles: [
+                {
+                  tenure_type: "TRIAL",
+                  total_cycles: 1,
+                  frequency: { interval_unit: "DAY", interval_count: 13 },
+                },
+                {
+                  tenure_type: "REGULAR",
+                  total_cycles: 0,
+                  frequency: { interval_unit: "MONTH", interval_count: 1 },
+                  pricing_scheme: {
+                    fixed_price: { value: "6.00", currency_code: "USD" },
+                  },
+                },
+              ],
+            },
+          },
+          "/v1/billing/subscriptions/": {
+            body: paypalSubscription({
+              id: "I-WHCONFIRM01",
+              custom_id: subjectId,
+              status: "ACTIVE",
+              billing_info: {
+                next_billing_time: new Date(Date.now() + 13 * DAY).toISOString(),
+              },
+            }),
+          },
+        });
+
+        const activate = (eventId) =>
+          withSignature(request(app).post("/api/v2/webhooks/paypal")).send({
+            id: eventId,
+            event_type: "BILLING.SUBSCRIPTION.ACTIVATED",
+            resource: paypalSubscription({ id: "I-WHCONFIRM01", status: "ACTIVE" }),
+          });
+
+        expect((await activate("evt-confirm-1")).status).toBe(200);
+        // A different event id, so the webhook-level duplicate guard does not
+        // account for this - the message ledger has to.
+        expect((await activate("evt-confirm-2")).status).toBe(200);
+
+        expect(sendMail).toHaveBeenCalledTimes(1);
+        const message = sendMail.mock.calls[0][0];
+        expect(message.to).toBe("wh-pp-confirm@example.com");
+        expect(message.text.replace(/\s+/g, " ")).toContain("USD 6.00 every month");
+      } finally {
+        sendMail.mockRestore();
+        delete process.env.CUSTOMER_ENROLLMENT_CONFIRMATION_ENABLED;
+      }
+    });
+
+    it("lets access lapse once the paid period has actually ended", async () => {
+      const tokens = await register("wh-pp-lapsed@example.com");
+      const { subjectId } = await linkPaypal(
+        tokens,
+        "I-WHLAPSED001",
+        "wh-pp-lapsed@example.com"
+      );
+
+      // The paid period ran out before PayPal told us anything.
+      await Entitlement.updateOne(
+        { source_ref: "I-WHLAPSED001" },
+        { $set: { expires_at: new Date(Date.now() - DAY) } }
+      );
+
+      installFetchStub({
+        ...paypalAuthRoute,
+        ...verifyRoute("SUCCESS"),
+        "/v1/billing/subscriptions/": {
+          body: paypalSubscription({
+            id: "I-WHLAPSED001",
+            custom_id: subjectId,
+            status: "CANCELLED",
+            billing_info: {},
+          }),
+        },
+      });
+
+      await withSignature(request(app).post("/api/v2/webhooks/paypal")).send({
+        id: "evt-cancel-lapsed",
+        event_type: "BILLING.SUBSCRIPTION.CANCELLED",
+        resource: paypalSubscription({ id: "I-WHLAPSED001", status: "CANCELLED" }),
+      });
 
       const after = await request(app)
         .get("/api/v2/entitlements")

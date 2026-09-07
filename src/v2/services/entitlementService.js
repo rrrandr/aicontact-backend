@@ -13,6 +13,43 @@ import { environmentAllowed } from "./appleService";
  * already been checked against the provider's own record.
  */
 
+// A cancellation must never shorten access the subscriber has already paid
+// for, but a refund or a revocation is exactly a statement that they have not.
+const IGNORES_PAID_PERIOD = new Set(["revoked", "refunded"]);
+
+/**
+ * Applies the preserved access-end date as a floor.
+ *
+ * The cancellation webhook arrives after PayPal has already cleared
+ * next_billing_time, so the shape derived from it says "expired, no expiry".
+ * Written as-is that would revoke a period the subscriber paid for - and the
+ * event is replayed on every retry, so it would do it repeatedly. The floor is
+ * whatever we recorded at cancellation, or, when the cancellation happened in
+ * PayPal's own interface and we are learning of it now, the expiry we last
+ * held. Only a refund or revocation is allowed past it.
+ */
+const applyPreservedAccess = (existing, incoming, preserveAccessUntil) => {
+  const floor = existing?.access_ends_at || preserveAccessUntil || null;
+
+  if (!floor || IGNORES_PAID_PERIOD.has(incoming.status)) return incoming;
+  if (floor.getTime() <= Date.now()) {
+    // Already elapsed: keep the record so the management view can still show
+    // what happened, but do not extend anything.
+    return { ...incoming, accessEndsAt: floor };
+  }
+
+  return {
+    ...incoming,
+    accessEndsAt: floor,
+    autoRenew: false,
+    status: incoming.status === "expired" ? "active" : incoming.status,
+    expiresAt:
+      !incoming.expiresAt || incoming.expiresAt.getTime() < floor.getTime()
+        ? floor
+        : incoming.expiresAt,
+  };
+};
+
 export const upsertEntitlement = async ({
   user,
   platform,
@@ -23,21 +60,42 @@ export const upsertEntitlement = async ({
   autoRenew,
   environment,
   sourceRef,
+  // Only supplied by the PayPal webhook, which is where we may first learn
+  // that a subscription was cancelled outside the app.
+  preserveAccessUntil = null,
 }) => {
+  const existing = await Entitlement.findOne({ user_id: user._id, platform });
+
+  const resolved = applyPreservedAccess(
+    existing,
+    { status, expiresAt, autoRenew: Boolean(autoRenew), accessEndsAt: null },
+    preserveAccessUntil
+  );
+
+  // A subscription that is active and will bill again is not cancelled, so the
+  // cancellation record is cleared rather than left to contradict it.
+  const billingAgain = resolved.status === "active" && resolved.autoRenew;
+
   const entitlement = await Entitlement.findOneAndUpdate(
     { user_id: user._id, platform },
     {
       $set: {
         subject_id: user.subject_id,
         product_id: productId,
-        status,
+        status: resolved.status,
         starts_at: startsAt,
-        expires_at: expiresAt,
-        auto_renew: Boolean(autoRenew),
+        expires_at: resolved.expiresAt,
+        auto_renew: resolved.autoRenew,
         environment: environment || "Production",
         source_ref: sourceRef,
         updated_at: new Date(),
+        ...(billingAgain || !resolved.accessEndsAt
+          ? {}
+          : { access_ends_at: resolved.accessEndsAt }),
       },
+      ...(billingAgain
+        ? { $unset: { access_ends_at: 1, cancelled_at: 1, cancellation_source: 1 } }
+        : {}),
     },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
@@ -100,6 +158,51 @@ const formatLegacyDate = (date) => {
     `${pad(date.getUTCMonth() + 1)}/${pad(date.getUTCDate())}/${date.getUTCFullYear()} ` +
     `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}`
   );
+};
+
+/**
+ * Records a confirmed cancellation against the entitlement.
+ *
+ * Called only after the provider has confirmed the subscription is no longer
+ * billing. Access is left in place until the date already paid for, so the
+ * status stays active and simply lapses on its own; writing "expired" here
+ * would take away a period the subscriber has bought.
+ */
+export const recordCancellation = async ({ user, platform, accessEndsAt, source }) => {
+  const now = new Date();
+  const stillCovered = Boolean(accessEndsAt && accessEndsAt.getTime() > now.getTime());
+
+  const entitlement = await Entitlement.findOneAndUpdate(
+    { user_id: user._id, platform },
+    {
+      $set: {
+        subject_id: user.subject_id,
+        access_ends_at: accessEndsAt,
+        cancelled_at: now,
+        cancellation_source: source,
+        auto_renew: false,
+        status: stillCovered ? "active" : "expired",
+        expires_at: accessEndsAt,
+        updated_at: now,
+      },
+    },
+    { new: true }
+  );
+
+  // No entitlement row means the subscription never activated - there is
+  // nothing to preserve and nothing to revoke.
+  if (!entitlement) return null;
+
+  await AuditLog.create({
+    action: "entitlement.cancelled",
+    user_id: user._id,
+    subject_id: user.subject_id,
+    detail: { platform, source, access_ends_at: accessEndsAt },
+  });
+
+  await syncLegacyField(user, entitlement);
+
+  return entitlement;
 };
 
 export const isActive = (entitlement) => {

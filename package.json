@@ -11,12 +11,14 @@
     "paypal:preflight": "babel-node scripts/paypal-sandbox-preflight.js",
     "paypal:create-catalogue": "babel-node scripts/paypal-sandbox-create-catalogue.js",
     "test:integration:paypal": "jest --config jest.integration.config.js --runInBand",
-    "backfill:email-norm": "babel-node scripts/backfill-email-norm.js"
+    "backfill:email-norm": "babel-node scripts/backfill-email-norm.js",
+    "dev:server": "babel-node scripts/dev-server.js"
   },
   "keywords": [],
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@aws-sdk/client-sns": "3.967.0",
     "bcryptjs": "^2.4.3",
     "body-parser": "^1.20.2",
     "cors": "^2.8.5",

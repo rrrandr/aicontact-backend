@@ -430,7 +430,7 @@ describe("a successful reset ends every outstanding reset link", () => {
 
     const first = await request(app)
       .post("/api/v2/auth/password/reset")
-      .send({ token: "twin-a", password: "set-by-twin-a" });
+      .send({ token: "twin-a", password: "set-by-twin-a-passphrase" });
     expect(first.status).toBe(200);
 
     const user = await User.findOne({ email_norm: email });
@@ -457,7 +457,7 @@ describe("a successful reset ends every outstanding reset link", () => {
 
     const asA = await request(app)
       .post("/api/v2/auth/login")
-      .send({ email, password: "set-by-twin-a" });
+      .send({ email, password: "set-by-twin-a-passphrase" });
     expect(asA.status).toBe(200);
   });
 

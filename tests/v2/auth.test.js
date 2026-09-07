@@ -49,6 +49,15 @@ describe("registration", () => {
       .post("/api/v2/auth/register")
       .send({ email: "v2short@example.com", password: "short" });
     expect(res.status).toBe(400);
+    expect(res.body.message).toContain("at least 8 characters");
+  });
+
+  it("refuses an obvious common password", async () => {
+    const res = await request(app)
+      .post("/api/v2/auth/register")
+      .send({ email: "v2common@example.com", password: "   password123   " });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe("Choose a less common password.");
   });
 
   it("ignores entitlement fields in the request body", async () => {

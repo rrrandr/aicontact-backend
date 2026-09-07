@@ -1,0 +1,52 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Allows the AICONTACT backend instance to publish the weekly billing summary
+  to one existing SNS topic, and to do nothing else with SNS.
+
+Parameters:
+  InstanceRoleName:
+    Type: String
+    Description: >-
+      Name of the IAM role attached to the AICONTACT backend EC2 instance
+      profile. Find it with:
+      aws ec2 describe-instances --instance-ids i-057ae18a360c34da6
+      --query "Reservations[].Instances[].IamInstanceProfile"
+
+  OwnerReportTopicArn:
+    Type: String
+    Default: arn:aws:sns:us-east-2:851725546085:AICONTACT-Production-Alerts
+    AllowedPattern: ^arn:aws:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]+$
+    Description: >-
+      The existing operations topic whose email subscription is already
+      confirmed. Verify before deploying with:
+      aws sns list-topics
+
+Resources:
+  # Publish, on one topic, and nothing else. No wildcard on the resource and no
+  # other SNS action, so this grant cannot be used to create topics, subscribe
+  # anyone, read subscriber addresses, or publish anywhere else.
+  WeeklyReportPublishPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: AICONTACT-WeeklyReport-SnsPublish
+      Description: >-
+        Publish the weekly billing summary to the AICONTACT operations topic.
+      Roles:
+        - !Ref InstanceRoleName
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PublishWeeklyOwnerSummary
+            Effect: Allow
+            Action: sns:Publish
+            Resource: !Ref OwnerReportTopicArn
+
+Outputs:
+  PolicyArn:
+    Description: The managed policy attached to the instance role.
+    Value: !Ref WeeklyReportPublishPolicy
+
+  TopicArn:
+    Description: Value for OWNER_REPORT_SNS_TOPIC_ARN in the backend environment.
+    Value: !Ref OwnerReportTopicArn

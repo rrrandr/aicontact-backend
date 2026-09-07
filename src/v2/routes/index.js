@@ -7,6 +7,7 @@ import * as auth from "../controllers/authController";
 import * as me from "../controllers/meController";
 import * as entitlements from "../controllers/entitlementController";
 import * as webhooks from "../controllers/webhookController";
+import * as subscription from "../controllers/subscriptionController";
 import * as billingReturn from "../controllers/billingReturnController";
 
 // v2 clients do not have v1's unbounded retry behaviour, so rejection-based
@@ -46,6 +47,11 @@ export const createV2Router = () => {
   router.patch("/me", requireAuth, me.patchMe);
   router.delete("/me", requireAuth, limiter(v2.remove), me.deleteMe);
 
+  // Acceptance of the legal documents. Idempotent by (account, document,
+  // version), so a client retrying after a dropped reply is safe.
+  router.post("/me/consent", requireAuth, limiter(v2.entitlement), me.recordConsent);
+  router.post("/me/consent/withdraw", requireAuth, limiter(v2.entitlement), me.withdrawConsent);
+
   router.get("/entitlements", requireAuth, entitlements.getEntitlement);
   // Apple routes exist only when Apple is enabled. Mounting a verification
   // endpoint that cannot be configured would answer requests it can never
@@ -66,6 +72,32 @@ export const createV2Router = () => {
     idempotency,
     entitlements.createPaypalSubscription
   );
+  // Subscription management for the signed-in account. Cancellation is
+  // idempotent by record, so the Idempotency-Key is a convenience for the
+  // client rather than the thing that makes a second click safe.
+  router.get("/entitlements/subscription", requireAuth, subscription.getSubscription);
+  router.post(
+    "/entitlements/paypal/cancel",
+    requireAuth,
+    limiter(v2.entitlement),
+    idempotency,
+    subscription.cancel
+  );
+  // Deliberately a separate call, made after cancellation has already
+  // succeeded. Feedback can never be a precondition for cancelling.
+  router.post(
+    "/entitlements/paypal/cancel/feedback",
+    requireAuth,
+    limiter(v2.entitlement),
+    subscription.submitCancellationFeedback
+  );
+  router.delete(
+    "/entitlements/paypal/cancel/feedback",
+    requireAuth,
+    limiter(v2.entitlement),
+    subscription.deleteCancellationFeedback
+  );
+
   router.post(
     "/entitlements/paypal/claim-legacy/start",
     requireAuth,

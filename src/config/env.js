@@ -128,11 +128,67 @@ export const config = {
     cancelUrl: process.env.PAYPAL_CANCEL_URL || "",
   },
 
+  // The weekly owner summary, in place of a message per signup and per
+  // cancellation. Off by default and with no recipient: a deployment has to
+  // turn it on deliberately, so nothing is ever sent by merely upgrading.
+  ownerReport: {
+    get enabled() {
+      return bool("WEEKLY_REPORT_ENABLED", false);
+    },
+    // "sns" publishes to the existing operations topic, "mail" goes through
+    // the transactional provider, "log" sends nothing. Separate from
+    // MAIL_PROVIDER on purpose: that one carries customer mail, and the two
+    // must be routable independently.
+    get transport() {
+      return (process.env.OWNER_REPORT_TRANSPORT || "log").trim();
+    },
+    get snsTopicArn() {
+      return (process.env.OWNER_REPORT_SNS_TOPIC_ARN || "").trim();
+    },
+    get region() {
+      return (process.env.OWNER_REPORT_AWS_REGION || process.env.AWS_REGION || "us-east-2").trim();
+    },
+    get to() {
+      return (process.env.OWNER_REPORT_TO || "").trim();
+    },
+    get timeZone() {
+      return process.env.WEEKLY_REPORT_TIMEZONE || "America/New_York";
+    },
+    // How often to check whether the week's report is still outstanding. The
+    // window, not the tick, decides what gets sent, so a short interval only
+    // shortens the delay after a failure.
+    get checkIntervalMs() {
+      return num("WEEKLY_REPORT_CHECK_INTERVAL_MS", 15 * 60 * 1000);
+    },
+  },
+
   mail: {
     provider: process.env.MAIL_PROVIDER || "log",
     apiKey: process.env.MAIL_PROVIDER_KEY || "",
     from: process.env.MAIL_FROM || "no-reply@example.invalid",
     resetUrlBase: process.env.PASSWORD_RESET_URL_BASE || "",
+  },
+
+  legal: {
+    // Where the four documents are published. Quoted in the terms-change
+    // notice, so it has to be the real address rather than a guess.
+    get publicUrl() {
+      return process.env.LEGAL_DOCUMENTS_URL || "https://facestreamai.com/legal";
+    },
+  },
+
+  // The annual reminder that a subscription is still running.
+  //
+  // Off until a mail provider is configured and the copy has been signed off:
+  // an obligation to send is not a licence to start sending from a deployment
+  // that has never sent a customer message before.
+  customerMail: {
+    get annualReminderEnabled() {
+      return bool("CUSTOMER_ANNUAL_REMINDER_ENABLED", false);
+    },
+    get enrollmentConfirmationEnabled() {
+      return bool("CUSTOMER_ENROLLMENT_CONFIRMATION_ENABLED", false);
+    },
   },
 
   // Read per request rather than at boot, so the payload served to clients
@@ -181,6 +237,12 @@ export const config = {
     },
     get auditLogDays() {
       return num("RETENTION_AUDIT_DAYS", 365);
+    },
+    // Cancellation feedback is free text somebody volunteered about why they
+    // left. It is useful for a while and then it is just old opinion held
+    // against a pseudonymous id, so it goes after a year.
+    get cancellationFeedbackDays() {
+      return num("RETENTION_CANCELLATION_FEEDBACK_DAYS", 365);
     },
   },
 

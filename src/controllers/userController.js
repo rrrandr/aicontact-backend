@@ -4,6 +4,7 @@ import { EntitlementAudit } from "../models/entitlementAudit";
 import { isValidEmail, normalizeEmail } from "../util/email";
 import { logger } from "../util/logger";
 import { legacyWritesLocked } from "../v2/services/entitlementService";
+import { newPasswordError } from "../util/passwordPolicy";
 
 /**
  * v1 controllers. Two released applications depend on these response bodies,
@@ -39,11 +40,12 @@ export const createUser = async (req, res, next) => {
       });
     }
 
-    if (typeof password !== "string" || password.length < 8) {
+    const passwordError = newPasswordError(password);
+    if (passwordError) {
       return res.status(400).json({
         code: 400,
         status: "Error",
-        message: "Password must be at least 8 characters.",
+        message: passwordError,
       });
     }
 
@@ -174,8 +176,6 @@ export const userUpdate = async (req, res, next) => {
           email_norm: normalizeEmail(saveData.email),
           previous_subscription_date: user.subscription_date,
           next_subscription_date: String(saveData.subscription_date),
-          ip: req.ip,
-          user_agent: req.get("user-agent"),
         });
       } catch (auditError) {
         logger.error("entitlement audit write failed", {

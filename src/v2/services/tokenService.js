@@ -3,7 +3,7 @@ import { config } from "../../config/env";
 import { RefreshToken } from "../../models/refreshToken";
 import { TokenFamily } from "../../models/tokenFamily";
 import { User } from "../../models/user";
-import { randomToken, sha256, hashIp } from "../../util/crypto";
+import { randomToken, sha256 } from "../../util/crypto";
 import crypto from "crypto";
 import { logger } from "../../util/logger";
 
@@ -49,8 +49,6 @@ export const issueRefreshToken = async (user, context = {}, familyId = null) => 
     user_id: user._id,
     family_id: family,
     expires_at: refreshExpiry(),
-    user_agent: context.userAgent,
-    ip_hash: hashIp(context.ip),
   });
 
   return token;
@@ -260,8 +258,6 @@ export const rotateRefreshToken = async (presented, context = {}) => {
       user_id: claimed.user_id,
       family_id: claimed.family_id,
       expires_at: refreshExpiry(),
-      user_agent: context.userAgent,
-      ip_hash: hashIp(context.ip),
     });
   } catch (error) {
     // Compensate: without this a transient write failure would consume the

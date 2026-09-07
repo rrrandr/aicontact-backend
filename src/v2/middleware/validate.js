@@ -1,3 +1,5 @@
+import { newPasswordError } from "../../util/passwordPolicy";
+
 export class ValidationError extends Error {
   constructor(message, field) {
     super(message);
@@ -21,18 +23,10 @@ export const requireString = (value, field, { min = 1, max = 4096 } = {}) => {
   return trimmed;
 };
 
-// Length is the only rule that reliably correlates with strength, so it is
-// the only one enforced. Composition rules push people toward predictable
-// substitutions without adding real entropy.
+// Prefer long passphrases and a blocklist over composition rules, which push
+// people toward predictable substitutions without adding reliable entropy.
 export const requirePassword = (value, field = "password") => {
-  if (typeof value !== "string") {
-    throw new ValidationError("password must be a string", field);
-  }
-  if (value.length < 8) {
-    throw new ValidationError("Password must be at least 8 characters.", field);
-  }
-  if (value.length > 200) {
-    throw new ValidationError("Password must be at most 200 characters.", field);
-  }
+  const error = newPasswordError(value);
+  if (error) throw new ValidationError(error, field);
   return value;
 };

@@ -10,8 +10,9 @@ const entitlementAuditSchema = new mongoose.Schema({
   // True when the write was ignored because the account has a server-owned
   // entitlement (V1_ENTITLEMENT_READONLY).
   ignored: { type: Boolean, default: false },
-  ip: String,
-  user_agent: String,
+  // No ip or user_agent. This row exists to measure abuse of an
+  // unauthenticated endpoint; the normalised address already identifies the
+  // account involved, and nothing reads a network origin.
   at: { type: Date, default: Date.now, index: true },
 });
 

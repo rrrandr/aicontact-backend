@@ -38,14 +38,27 @@ describe("refresh rotation under a paused winner", () => {
       release = resolve;
     });
 
-    const realUpdateOne = RefreshToken.updateOne.bind(RefreshToken);
-    jest.spyOn(RefreshToken, "updateOne").mockImplementation(async (filter, update, ...rest) => {
+    // Pauses the write that consumes the presented token and names its
+    // successor. Rotation performs that as ONE findOneAndUpdate; this hook used
+    // to watch updateOne for the same thing, which no call has done since the
+    // two writes were merged - so it never engaged, the loser below never ran,
+    // and this test quietly stopped exercising the window it is named after.
+    const realClaim = RefreshToken.findOneAndUpdate.bind(RefreshToken);
+    let paused = false;
+    jest.spyOn(RefreshToken, "findOneAndUpdate").mockImplementation(async (filter, update, ...rest) => {
       const setsSuccessor = update && update.$set && "replaced_by" in update.$set;
-      if (setsSuccessor) {
-        reachedSecondWrite();
-        await held;
-      }
-      return realUpdateOne(filter, update, ...rest);
+
+      // Only the winner waits. The loser reaches the same line, and holding it
+      // there too would deadlock the test rather than test anything.
+      if (!setsSuccessor || paused) return realClaim(filter, update, ...rest);
+      paused = true;
+
+      // Paused AFTER the consume lands, which is the window a loser has to
+      // arrive in for this to be a test of anything.
+      const claimed = await realClaim(filter, update, ...rest);
+      reachedSecondWrite();
+      await held;
+      return claimed;
     });
 
     const winner = request(app)
