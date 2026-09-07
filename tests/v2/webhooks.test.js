@@ -452,3 +452,33 @@ describeIfSsl("webhooks", () => {
     });
   });
 });
+
+/**
+ * The version of App Store Server Notifications configured in App Store
+ * Connect is not visible from here, and getting it wrong fails silently:
+ * subscriptions simply stop updating. A V1 notification is a distinct shape,
+ * so it can at least be named the moment one arrives.
+ */
+describe("apple notification version", () => {
+  const app = createApp();
+
+  it("names a Version 1 notification instead of failing opaquely", async () => {
+    const res = await request(app)
+      .post("/api/v2/webhooks/apple")
+      .send({
+        notification_type: "DID_RENEW",
+        auto_renew_product_id: "com.FaceStreamCorporation.AICONTACT.monthly",
+        unified_receipt: { status: 0 },
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("apple_notification_version_1");
+  });
+
+  it("still rejects a body that is neither version", async () => {
+    const res = await request(app).post("/api/v2/webhooks/apple").send({ nonsense: true });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBeUndefined();
+  });
+});

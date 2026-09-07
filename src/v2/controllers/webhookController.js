@@ -126,6 +126,28 @@ export const appleWebhook = async (req, res, next) => {
     const signedPayload = req.body?.signedPayload;
 
     if (typeof signedPayload !== "string") {
+      // A Version 1 notification is a different shape entirely: notification_type
+      // and unified_receipt, no signedPayload. It is worth naming, because the
+      // symptom of the wrong version being configured in App Store Connect is
+      // silent - subscriptions simply stop updating - and "Missing signedPayload"
+      // does not tell anyone why.
+      const looksV1 =
+        typeof req.body?.notification_type === "string" ||
+        req.body?.unified_receipt !== undefined ||
+        req.body?.auto_renew_product_id !== undefined;
+
+      if (looksV1) {
+        logger.error("apple sent a VERSION 1 notification; this server only accepts VERSION 2", {
+          notification_type: req.body.notification_type,
+          fix: "App Store Connect > App Information > App Store Server Notifications: set both URLs to Version 2",
+        });
+        return res.status(400).json({
+          status: "Error",
+          code: "apple_notification_version_1",
+          message: "This endpoint accepts App Store Server Notifications V2 only.",
+        });
+      }
+
       return res.status(400).json({ status: "Error", message: "Missing signedPayload" });
     }
 
