@@ -1,0 +1,16 @@
+{
+  "_comment": [
+    "The document versions the client ships, mirrored here so the server can be",
+    "checked without a second checkout. The Unity repository is the source of",
+    "truth: each value is the Version line of the corresponding file under",
+    "Assets/Resources/Legal.",
+    "",
+    "Updating a legal document means changing three things together - the",
+    "document, this manifest, and the published web page. scripts/verify-legal-versions.mjs",
+    "compares this against the real Unity documents and is a release step, not a",
+    "unit test, because it needs both checkouts."
+  ],
+  "terms": "2026-09-06.4",
+  "privacy": "2026-09-06.2",
+  "camera": "2026-09-06.2"
+}

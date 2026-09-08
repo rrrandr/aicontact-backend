@@ -8,10 +8,11 @@
  * that has not changed - or worse, will not ask when it has.
  */
 export const CURRENT_DOCUMENT_VERSIONS = {
-  terms: process.env.LEGAL_TERMS_VERSION || "2026-09-06",
-  privacy: process.env.LEGAL_PRIVACY_VERSION || "2026-09-06",
-  camera: process.env.LEGAL_CAMERA_VERSION || "2026-09-06",
-  age_attestation: process.env.LEGAL_AGE_VERSION || "2026-09-06",
+  terms: process.env.LEGAL_TERMS_VERSION || "2026-09-06.4",
+  privacy: process.env.LEGAL_PRIVACY_VERSION || "2026-09-06.2",
+  camera: process.env.LEGAL_CAMERA_VERSION || "2026-09-06.2",
+  // The attestation rides the Terms acceptance and carries the Terms version.
+  age_attestation: process.env.LEGAL_AGE_VERSION || "2026-09-06.4",
 };
 
 export const DOCUMENTS = Object.keys(CURRENT_DOCUMENT_VERSIONS);
