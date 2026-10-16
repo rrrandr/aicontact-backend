@@ -43,6 +43,28 @@ const entitlementSchema = new mongoose.Schema(
 
     // Which provider record produced this row, for tracing back.
     source_ref: String,
+
+    // What this row grants. An entitlement row exists because a provider is
+    // billing somebody, so it is paid; Free is not a row at all and lives on
+    // the user, because inventing a provider subscription for a free account
+    // would mean a fake record with no expiry competing against real ones.
+    //
+    // Rows written before tiers existed carry nothing here. That absence is
+    // read as paid ONLY while the row is active - see resolveEntitlement.
+    tier: { type: String, enum: ["paid", "free"], default: "paid" },
+
+    // A change the provider has accepted but not applied yet.
+    //
+    // STORED, NOT ACTIVE. Nothing resolves access from this: the provider
+    // applies the change at its own effective time and tells us, and a
+    // timestamp passing on a server clock grants nothing on its own.
+    pending_change: {
+      tier: { type: String, enum: ["paid", "free"] },
+      plan_id: String,
+      effective_at: Date,
+      source: String,
+    },
+
     updated_at: { type: Date, default: Date.now },
   },
   { timestamps: { createdAt: "created_at", updatedAt: false } }

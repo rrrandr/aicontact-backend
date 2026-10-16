@@ -39,6 +39,21 @@ const userSchema = new Schema({
   // All of these are stripped from serialization below so that v1 response
   // bodies stay byte-identical; v2 builds its own DTOs explicitly.
 
+  // When this account moved to the free plan, or absent.
+  //
+  // WHY HERE AND NOT AN ENTITLEMENT ROW. Free has no provider behind it, so a
+  // row would be an invented subscription - and one with no expiry, which in a
+  // collection sorted by expiry would outrank a real paid entitlement. Keeping
+  // it on the account means resolveEntitlement can check active paid access
+  // FIRST and only then fall back to this, so free can never outrank paid.
+  //
+  // Clearing it is a transition, not a read: it requires a verified new paid
+  // purchase and is deliberately not implemented in this increment.
+  free_plan_since: {
+    type: Date,
+    required: false,
+  },
+
   // Stable pseudonymous identifier. Survives account deletion so financial
   // records can be retained without retaining the person.
   subject_id: { type: String, index: true, sparse: true },

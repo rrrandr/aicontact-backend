@@ -247,6 +247,50 @@ export const resolveEntitlement = async (user) => {
     days_remaining: best && best.expires_at
       ? Math.max(0, Math.ceil((best.expires_at.getTime() - Date.now()) / 86400000))
       : null,
+    tier: resolveTier(user, best),
+    pending_change: pendingChangeOf(best),
+  };
+};
+
+/**
+ * Which tier this account is on.
+ *
+ * ACTIVE PAID ACCESS IS CHECKED FIRST, and that ordering is the whole design.
+ * `best` is already the best ACTIVE row, so an account that is genuinely
+ * paying resolves to paid before the free marker is ever consulted - which is
+ * why a stale free marker cannot outrank a real subscription, and why clearing
+ * that marker is a tidiness concern rather than a correctness one.
+ *
+ * A row with no tier is the legacy shape, written before tiers existed, and
+ * means paid. That reading is safe only because it applies to an ACTIVE row:
+ * an inactive one never reaches here.
+ *
+ * With neither an active row nor a free marker the answer is null - not
+ * "free". The client reads that as unverified and grants nothing, because
+ * "nobody has told us" is a different thing from "we are told it is free".
+ */
+const resolveTier = (user, best) => {
+  if (best) return best.tier || "paid";
+  if (user?.free_plan_since) return "free";
+  return null;
+};
+
+/**
+ * A change the provider has scheduled but not applied, or null.
+ *
+ * Reported only. Nothing here compares effective_at against the clock,
+ * because a change takes effect when the provider applies it and says so -
+ * not when a server's own time passes a stored date.
+ */
+const pendingChangeOf = (best) => {
+  const pending = best?.pending_change;
+  if (!pending || !pending.tier) return null;
+
+  return {
+    tier: pending.tier,
+    plan_id: pending.plan_id || null,
+    effective_at: pending.effective_at ? pending.effective_at.toISOString() : null,
+    source: pending.source || null,
   };
 };
 
